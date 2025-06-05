@@ -1,6 +1,6 @@
 <?php
 include 'connect.php';
-include 'includes/header.php';
+
 // No navbar for a clean landing page
 ?>
 <link rel="stylesheet" href="/assets/css/style.css">
@@ -11,7 +11,7 @@ include 'includes/header.php';
     <div class="banner-content">
       <h1>Your Car,<br>Everywhere and Everytime</h1>
       <div class="banner-logo-below-title">
-        <img src="/assets/images/Timeless_logo.png" alt="Timeless Car Rental Logo">
+        <img src="/assets/images/TimeLess_logo.png" alt="Timeless Car Rental Logo">
       </div>
       <p class="banner-desc">Book your car with ease!</p>
       <a href="/customer/register.php" class="register-link">Register Now &rarr;</a>
