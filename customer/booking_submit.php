@@ -1,4 +1,9 @@
 <?php
+// Enable error reporting (for debugging, remove in production)
+ini_set('display_errors', 1);
+ini_set('display_startup_errors', 1);
+error_reporting(E_ALL);
+
 session_start();
 if (
     !isset($_SESSION['cust_id']) ||
@@ -41,6 +46,7 @@ $stmt_car->execute();
 $result_car = $stmt_car->get_result();
 $car_row = $result_car->fetch_assoc();
 $car_price = $car_row['daily_rate'] ?? 0;
+$stmt_car->close();
 
 // Calculate delivery fee
 $delivery_fee = 0;
@@ -53,44 +59,48 @@ $total_price = ($car_price * $booking_duration) + $delivery_fee;
 $status = 'pending';
 
 // 2. Update customer (driver) info in customer table
-$stmt_cust = $conn->prepare("UPDATE customer SET full_name=?, phone_no=?, email=?, id_no=?, license_no=?, passport_no=?, id_front_image=?, id_back_image=?, address=?, country=?, age=? WHERE cust_id=?");
 $id_front_blob = file_to_blob($driver['driver_id_front'] ?? null);
 $id_back_blob = file_to_blob($driver['driver_id_back'] ?? null);
+
+$stmt_cust = $conn->prepare("UPDATE customer SET full_name=?, phone_no=?, email=?, id_no=?, license_no=?, id_front_image=?, id_back_image=?, address=?, age=? WHERE cust_id=?");
 $stmt_cust->bind_param(
-    "ssssssssssii",
+    "ssssssssis",
     $driver['driver_full_name'],
     $driver['driver_phone_no'],
     $driver['driver_email'],
     $driver['driver_id_no'],
     $driver['driver_license_no'],
-    $driver['driver_passport_no'],
     $id_front_blob,
     $id_back_blob,
     $driver['driver_address'],
-    $driver['driver_country'],
     $driver['driver_age'],
     $cust_id
 );
-$stmt_cust->send_long_data(6, $id_front_blob);
-$stmt_cust->send_long_data(7, $id_back_blob);
+$stmt_cust->send_long_data(5, $id_front_blob);
+$stmt_cust->send_long_data(6, $id_back_blob);
 $stmt_cust->execute();
+if ($stmt_cust->error) die('Customer update error: ' . $stmt_cust->error);
+$stmt_cust->close();
 
 // 3. Insert booking record
 $stmt = $conn->prepare("INSERT INTO booking (cust_id, car_id, pickup_datetime, return_datetime, booking_duration, total_price, status) VALUES (?, ?, ?, ?, ?, ?, ?)");
 $stmt->bind_param("iissids", $cust_id, $car_id, $pickup_datetime, $return_datetime, $booking_duration, $total_price, $status);
 $stmt->execute();
+if ($stmt->error) die('Booking insert error: ' . $stmt->error);
 $booking_id = $stmt->insert_id;
+$stmt->close();
 
 // Insert service (delivery/pickup info) HERE:
 if ($delivery_type !== "self_pickup") {
     $fee = ($delivery_type === "delivery") ? 10.00 : 30.00;
-    $notes = null; // Or set this to a string if you want to save a note
+    $notes = null;
     $stmt2 = $conn->prepare("INSERT INTO service (booking_id, service_type, fee, notes) VALUES (?, ?, ?, ?)");
     $stmt2->bind_param("isds", $booking_id, $delivery_type, $fee, $notes);
     $stmt2->execute();
     if ($stmt2->error) {
         die("Service insert error: " . $stmt2->error);
     }
+    $stmt2->close();
 }
 
 // 5. Insert guarantor record
@@ -100,17 +110,21 @@ $stmt4 = $conn->prepare("INSERT INTO guarantor (cust_id, full_name, phone_no, id
 $stmt4->bind_param(
     "issssss",
     $cust_id,
-    $guarantor['full_name'],
-    $guarantor['phone_no'],
-    $guarantor['id_no'],
+    $guarantor['guarantor_full_name'],
+    $guarantor['guarantor_phone_no'],
+    $guarantor['guarantor_id_no'],
     $guar_id_front_blob,
     $guar_id_back_blob,
-    $guarantor['relationship']
+    $guarantor['guarantor_relationship']
 );
 $stmt4->send_long_data(4, $guar_id_front_blob);
 $stmt4->send_long_data(5, $guar_id_back_blob);
 $stmt4->execute();
+if ($stmt4->error) {
+    die('Guarantor insert error: ' . $stmt4->error);
+}
 $guarantor_id = $stmt4->insert_id;
+$stmt4->close();
 
 // 6. Handle signature image (from base64)
 $signature_data = $_POST['signature_data'];
@@ -151,6 +165,7 @@ $stmt_cust_name->execute();
 $result_cust = $stmt_cust_name->get_result();
 $customer_row = $result_cust->fetch_assoc();
 $customer_name = $customer_row['full_name'] ?? '';
+$stmt_cust_name->close();
 
 $pdf = new TCPDF();
 $pdf->AddPage();
@@ -162,40 +177,73 @@ $pdf->MultiCell(0, 7, $agreement_terms, 0, 'L');
 $pdf->Ln(7);
 $pdf->SetFont('helvetica', '', 10);
 $pdf->MultiCell(0, 7, "Customer Name: {$customer_name}", 0, 'L');
-$pdf->MultiCell(0, 7, "Guarantor Name: {$guarantor['full_name']}", 0, 'L');
+$pdf->MultiCell(0, 7, "Guarantor Name: {$guarantor['guarantor_full_name']}", 0, 'L');
 $pdf->MultiCell(0, 7, "Pickup: $pickup_datetime | Return: $return_datetime", 0, 'L');
+
+// --- Add ID Images Section ---
+$pdf->Ln(7);
+$pdf->SetFont('helvetica', 'B', 10);
+$pdf->MultiCell(0, 7, "Customer ID Images (Front & Back):", 0, 'L');
+if (!empty($driver['driver_id_front']) && file_exists($driver['driver_id_front'])) {
+    $pdf->Image($driver['driver_id_front'], $pdf->GetX(), $pdf->GetY(), 40, 25, '', '', '', false, 300);
+    $pdf->Ln(27);
+} else {
+    $pdf->MultiCell(0, 7, "Front ID not available.", 0, 'L');
+}
+if (!empty($driver['driver_id_back']) && file_exists($driver['driver_id_back'])) {
+    $pdf->Image($driver['driver_id_back'], $pdf->GetX(), $pdf->GetY(), 40, 25, '', '', '', false, 300);
+    $pdf->Ln(27);
+} else {
+    $pdf->MultiCell(0, 7, "Back ID not available.", 0, 'L');
+}
+
+$pdf->SetFont('helvetica', 'B', 10);
+$pdf->MultiCell(0, 7, "Guarantor ID Images (Front & Back):", 0, 'L');
+if (!empty($guarantor['guarantor_id_front']) && file_exists($guarantor['guarantor_id_front'])) {
+    $pdf->Image($guarantor['guarantor_id_front'], $pdf->GetX(), $pdf->GetY(), 40, 25, '', '', '', false, 300);
+    $pdf->Ln(27);
+} else {
+    $pdf->MultiCell(0, 7, "Front ID not available.", 0, 'L');
+}
+if (!empty($guarantor['guarantor_id_back']) && file_exists($guarantor['guarantor_id_back'])) {
+    $pdf->Image($guarantor['guarantor_id_back'], $pdf->GetX(), $pdf->GetY(), 40, 25, '', '', '', false, 300);
+    $pdf->Ln(27);
+} else {
+    $pdf->MultiCell(0, 7, "Back ID not available.", 0, 'L');
+}
+
+// --- Signature Section ---
 $pdf->Ln(7);
 $pdf->SetFont('helvetica', 'B', 11);
 $pdf->MultiCell(0, 7, "Customer Signature:", 0, 'L');
 $pdf->Image($signature_path, $pdf->GetX(), $pdf->GetY(), 60, 30, 'PNG');
 $pdf->Ln(35);
 
-$pdf_path = 'C:/xampp/htdocs/fypfathehah/uploads/agreements/' . uniqid('agreement_') . '.pdf';
-if (!is_dir(dirname($pdf_path))) mkdir(dirname($pdf_path), 0777, true);
-$pdf_dir = dirname($pdf_path);
-if (!is_writable($pdf_dir)) {
-    die('Directory is not writable: ' . realpath($pdf_dir));
-} else {
-    // Optional: Show a success message for debugging
-    // echo 'Directory is writable: ' . realpath($pdf_dir);
-}
-
-
+// Save PDF
+$relative_path = '/uploads/agreements/' . uniqid('agreement_') . '.pdf';
+$pdf_path = $_SERVER['DOCUMENT_ROOT'] . $relative_path;
 $pdf->Output($pdf_path, 'F');
+if (!file_exists($pdf_path)) {
+    die('PDF was not created: ' . $pdf_path);
+}
 
 // 8. Insert into agreement_form (store PDF and signature as LONGBLOB)
 $admin_id = null; // NULL at this stage
-$agreement_file = file_get_contents($pdf_path); // For LONGBLOB field
+$agreement_file = file_get_contents($pdf_path);
 
 $stmt5 = $conn->prepare("INSERT INTO agreement_form (booking_id, customer_id, guarantor_id, admin_id, agreement_file_path, cust_signature) VALUES (?, ?, ?, ?, ?, ?)");
+$stmt5->bind_param("iiiiss", $booking_id, $cust_id, $guarantor_id, $admin_id, $agreement_file, $signature_binary);
 $stmt5->send_long_data(4, $agreement_file);
 $stmt5->send_long_data(5, $signature_binary);
-$stmt5->bind_param("iiiiss", $booking_id, $cust_id, $guarantor_id, $admin_id, $agreement_file, $signature_binary);
 $stmt5->execute();
+if ($stmt5->error) {
+    die('Agreement form insert error: ' . $stmt5->error);
+}
+$agreement_id = $stmt5->insert_id;
+$stmt5->close();
 
 // 9. Unset sessions
 unset($_SESSION['booking_data'], $_SESSION['driver_data'], $_SESSION['guarantor_data']);
-
 ?>
 
 <link rel="stylesheet" href="/assets/css/style.css">
@@ -233,7 +281,7 @@ unset($_SESSION['booking_data'], $_SESSION['driver_data'], $_SESSION['guarantor_
         <button type="submit" class="next-btn">Proceed to Payment</button>
     </form>
     <p style="margin-top:18px;">
-        <a href="<?= htmlspecialchars(str_replace('../', '/', $pdf_path)) ?>" target="_blank">Download Agreement PDF</a>
+        <a href="download_agreement.php?id=<?= $agreement_id ?>" target="_blank">Download Agreement PDF</a>
     </p>
 </div>
 

@@ -11,10 +11,10 @@ include '../includes/header.php';
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['guarantor_full_name'])) {
     // Store guarantor data in session (to be used in final booking_submit.php)
     $_SESSION['guarantor_data'] = [
-        'full_name'    => $_POST['guarantor_full_name'] ?? '',
-        'phone_no'     => $_POST['guarantor_phone_no'] ?? '',
-        'id_no'        => $_POST['guarantor_id_no'] ?? '',
-        'relationship' => $_POST['guarantor_relationship'] ?? '',
+        'guarantor_full_name'    => $_POST['guarantor_full_name'] ?? '',
+        'guarantor_phone_no'     => $_POST['guarantor_phone_no'] ?? '',
+        'guarantor_id_no'        => $_POST['guarantor_id_no'] ?? '',
+        'guarantor_relationship' => $_POST['guarantor_relationship'] ?? '',
     ];
     // Handle uploaded images (store in session temporarily as file paths)
     if (isset($_FILES['guarantor_id_front']) && $_FILES['guarantor_id_front']['error'] === UPLOAD_ERR_OK) {
@@ -103,9 +103,21 @@ input[type="checkbox"] {margin-right: 8px;}
     font-weight: 600;
     cursor: pointer;
     transition: background 0.18s;
-    margin-top: 18px;
+    margin-left: 8px;
 }
 .next-btn:hover {background: #234c96;}
+.back-btn {
+    background: #ccc;
+    color: #222;
+    border: none;
+    padding: 12px 30px;
+    border-radius: 7px;
+    font-size: 1.08em;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.18s;
+}
+.back-btn:hover {background: #bbb;}
 #signature-pad {
     width: 100%;
     height: 130px;
@@ -117,6 +129,10 @@ input[type="checkbox"] {margin-right: 8px;}
 .sig-label {
     font-weight: 600;
     color: #444;
+}
+.btn-row {
+    margin-top: 28px;
+    text-align: right;
 }
 </style>
 
@@ -138,7 +154,8 @@ input[type="checkbox"] {margin-right: 8px;}
                 <button type="button" onclick="clearSignaturePad();" style="font-size:0.98em;padding:4px 18px;">Clear</button>
             </div>
         </div>
-        <div style="text-align: right;">
+        <div class="btn-row">
+            <a href="review_booking.php" class="back-btn" style="text-decoration: none; display: inline-block;">Back</a>
             <button type="submit" class="next-btn">Submit Booking</button>
         </div>
     </form>

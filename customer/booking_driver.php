@@ -66,6 +66,12 @@ $stmt->close();
     font-weight: 600;
     margin-bottom: 4px;
 }
+.required-star {
+    color: #c62828;
+    margin-left: 3px;
+    font-weight: bold;
+    font-size: 1.1em;
+}
 input[type="text"], input[type="email"], input[type="file"], input[type="number"], select {
     width: 100%;
     padding: 7px 8px;
@@ -85,50 +91,70 @@ input[type="file"] {padding: 4px 0;}
     font-weight: 600;
     cursor: pointer;
     transition: background 0.18s;
+    margin-left: 8px;
 }
 .next-btn:hover {background: #234c96;}
+.back-btn {
+    background: #ccc;
+    color: #222;
+    border: none;
+    padding: 12px 30px;
+    border-radius: 7px;
+    font-size: 1.08em;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.18s;
+}
+.back-btn:hover {
+    background: #bbb;
+}
+.btn-row {
+    margin-top: 28px;
+    text-align: right;
+}
 </style>
 
 <div class="form-section">
     <div class="form-title">Driver's Details (Customer)</div>
     <form action="booking_guarantor.php" method="POST" enctype="multipart/form-data">
         <div class="input-row">
-            <label class="input-label">Full Name</label>
+            <label class="input-label">Full Name<span class="required-star">*</span></label>
             <input type="text" name="driver_full_name" value="<?= htmlspecialchars($full_name ?? '') ?>" required>
         </div>
         <div class="input-row">
-            <label class="input-label">Phone Number</label>
+            <label class="input-label">Phone Number<span class="required-star">*</span></label>
             <input type="text" name="driver_phone_no" value="<?= htmlspecialchars($phone_no ?? '') ?>" required>
         </div>
         <div class="input-row">
-            <label class="input-label">Email</label>
+            <label class="input-label">Email<span class="required-star">*</span></label>
             <input type="email" name="driver_email" value="<?= htmlspecialchars($email ?? '') ?>" required>
         </div>
         <div class="input-row">
-            <label class="input-label">ID Number</label>
-            <input type="text" name="driver_id_no" value="<?= htmlspecialchars($id_no ?? '') ?>">
+            <label class="input-label">ID Number<span class="required-star">*</span></label>
+            <input type="text" name="driver_id_no" value="<?= htmlspecialchars($id_no ?? '') ?>" required>
         </div>
         <div class="input-row">
-            <label class="input-label">ID Front Image</label>
-            <input type="file" name="driver_id_front" accept="image/*">
+            <label class="input-label">ID Front Image<span class="required-star">*</span></label>
+            <input type="file" name="driver_id_front" accept="image/*" required>
         </div>
         <div class="input-row">
-            <label class="input-label">ID Back Image</label>
-            <input type="file" name="driver_id_back" accept="image/*">
+            <label class="input-label">ID Back Image<span class="required-star">*</span></label>
+            <input type="file" name="driver_id_back" accept="image/*" required>
         </div>
         <div class="input-row">
-            <label class="input-label">License Number</label>
-            <input type="text" name="driver_license_no" value="<?= htmlspecialchars($license_no ?? '') ?>">
+            <label class="input-label">License Number<span class="required-star">*</span></label>
+            <input type="text" name="driver_license_no" value="<?= htmlspecialchars($license_no ?? '') ?>" required>
         </div>
         <div class="input-row">
-            <label class="input-label">Address</label>
-            <input type="text" name="driver_address" value="<?= htmlspecialchars($address ?? '') ?>">
+            <label class="input-label">Address<span class="required-star">*</span></label>
+            <input type="text" name="driver_address" value="<?= htmlspecialchars($address ?? '') ?>" required>
         </div>
         <div class="input-row">
-            <label class="input-label">Age</label>
-            <input type="number" name="driver_age" min="18" value="<?= htmlspecialchars($age ?? '') ?>">
+            <label class="input-label">Age<span class="required-star">*</span></label>
+            <input type="number" name="driver_age" min="18" value="<?= htmlspecialchars($age ?? '') ?>" required>
         </div>
-        <div style="margin-top: 28px; text-align: right;">
+        <div class="btn-row">
+            <button type="button" class="back-btn" onclick="window.history.back();">Back</button>
             <button type="submit" class="next-btn">Next</button>
         </div>
     </form>

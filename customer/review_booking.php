@@ -6,10 +6,10 @@ include '../includes/header.php';
 // 1. Handle guarantor POST from previous form (booking_guarantor.php)
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['guarantor_full_name'])) {
     $_SESSION['guarantor_data'] = [
-        'full_name'     => $_POST['guarantor_full_name'] ?? '',
-        'phone_no'      => $_POST['guarantor_phone_no'] ?? '',
-        'id_no'         => $_POST['guarantor_id_no'] ?? '',
-        'relationship'  => $_POST['guarantor_relationship'] ?? '',
+        'guarantor_full_name'     => $_POST['guarantor_full_name'] ?? '',
+        'guarantor_phone_no'      => $_POST['guarantor_phone_no'] ?? '',
+        'guarantor_id_no'         => $_POST['guarantor_id_no'] ?? '',
+        'guarantor_relationship'  => $_POST['guarantor_relationship'] ?? '',
     ];
     // Handle uploaded images (store in session as temp file paths)
     if (isset($_FILES['guarantor_id_front']) && $_FILES['guarantor_id_front']['error'] === UPLOAD_ERR_OK) {
@@ -87,9 +87,35 @@ body { background: #eceef4; }
 .review-table td:last-child { text-align: right; }
 .total { font-size:1.1em; font-weight: bold; color: #203090; }
 .section-label { margin: 18px 0 8px 0; font-weight: 600; color: #444; }
-.btn { padding: 1em 2em; font-size: 1em; border-radius: 6px; margin: 8px; }
-.btn-next { background: #3c4cb8; color: #fff; border: none; }
-.btn-back { background: #eee; color: #444; border: 1px solid #ccc; }
+.btn-row {
+    margin-top: 28px;
+    text-align: right;
+}
+.next-btn {
+    background: #3c4cb8;
+    color: #fff;
+    border: none;
+    padding: 12px 30px;
+    border-radius: 7px;
+    font-size: 1.08em;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.18s;
+    margin-left: 8px;
+}
+.next-btn:hover {background: #234c96;}
+.back-btn {
+    background: #ccc;
+    color: #222;
+    border: none;
+    padding: 12px 30px;
+    border-radius: 7px;
+    font-size: 1.08em;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.18s;
+}
+.back-btn:hover {background: #bbb;}
 </style>
 
 <div class="review-section">
@@ -116,23 +142,23 @@ body { background: #eceef4; }
         <tr><th>Email</th><td><?= htmlspecialchars($driver['driver_email']) ?></td></tr>
         <tr><th>ID No</th><td><?= htmlspecialchars($driver['driver_id_no']) ?></td></tr>
         <tr><th>License No</th><td><?= htmlspecialchars($driver['driver_license_no']) ?></td></tr>
-        <tr><th>Passport No</th><td><?= htmlspecialchars($driver['driver_passport_no']) ?></td></tr>
         <tr><th>Address</th><td><?= htmlspecialchars($driver['driver_address']) ?></td></tr>
-        <tr><th>Country</th><td><?= htmlspecialchars($driver['driver_country']) ?></td></tr>
         <tr><th>Age</th><td><?= htmlspecialchars($driver['driver_age']) ?></td></tr>
     </table>
     <div class="section-label">Guarantor</div>
     <table class="review-table">
-        <tr><th>Name</th><td><?= htmlspecialchars($guarantor['full_name']) ?></td></tr>
-        <tr><th>Phone</th><td><?= htmlspecialchars($guarantor['phone_no']) ?></td></tr>
-        <tr><th>ID No</th><td><?= htmlspecialchars($guarantor['id_no']) ?></td></tr>
-        <tr><th>Relationship</th><td><?= htmlspecialchars($guarantor['relationship']) ?></td></tr>
+        <tr><th>Name</th><td><?= htmlspecialchars($guarantor['guarantor_full_name']) ?></td></tr>
+        <tr><th>Phone</th><td><?= htmlspecialchars($guarantor['guarantor_phone_no']) ?></td></tr>
+        <tr><th>ID No</th><td><?= htmlspecialchars($guarantor['guarantor_id_no']) ?></td></tr>
+        <tr><th>Relationship</th><td><?= htmlspecialchars($guarantor['guarantor_relationship']) ?></td></tr>
     </table>
-    <form action="booking_agreement.php" method="post" style="display:inline;">
-        <button type="submit" class="btn btn-next">Next</button>
-    </form>
-    <form action="booking_guarantor.php" method="get" style="display:inline;">
-        <button type="submit" class="btn btn-back">Back</button>
-    </form>
+    <div class="btn-row">
+        <form action="booking_guarantor.php" method="get" style="display:inline;">
+            <button type="submit" class="back-btn">Back</button>
+        </form>
+        <form action="booking_agreement.php" method="post" style="display:inline;">
+            <button type="submit" class="next-btn">Next</button>
+        </form>
+    </div>
 </div>
 <?php include '../includes/footer.php'; ?>
