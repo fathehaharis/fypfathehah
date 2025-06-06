@@ -59,8 +59,14 @@ $total_price = ($car_price * $booking_duration) + $delivery_fee;
 $status = 'pending';
 
 // 2. Update customer (driver) info in customer table
-$id_front_blob = file_to_blob($driver['driver_id_front'] ?? null);
-$id_back_blob = file_to_blob($driver['driver_id_back'] ?? null);
+$id_front_blob = null;
+$id_back_blob = null;
+if (!empty($driver['driver_id_front']) && file_exists($driver['driver_id_front'])) {
+    $id_front_blob = file_get_contents($driver['driver_id_front']);
+}
+if (!empty($driver['driver_id_back']) && file_exists($driver['driver_id_back'])) {
+    $id_back_blob = file_get_contents($driver['driver_id_back']);
+}
 
 $stmt_cust = $conn->prepare("UPDATE customer SET full_name=?, phone_no=?, email=?, id_no=?, license_no=?, id_front_image=?, id_back_image=?, address=?, age=? WHERE cust_id=?");
 $stmt_cust->bind_param(
@@ -76,8 +82,9 @@ $stmt_cust->bind_param(
     $driver['driver_age'],
     $cust_id
 );
-$stmt_cust->send_long_data(5, $id_front_blob);
-$stmt_cust->send_long_data(6, $id_back_blob);
+// Only send long data if not null (PHP 8.1+ deprecation safe)
+if ($id_front_blob !== null) $stmt_cust->send_long_data(5, $id_front_blob);
+if ($id_back_blob !== null) $stmt_cust->send_long_data(6, $id_back_blob);
 $stmt_cust->execute();
 if ($stmt_cust->error) die('Customer update error: ' . $stmt_cust->error);
 $stmt_cust->close();
@@ -104,8 +111,14 @@ if ($delivery_type !== "self_pickup") {
 }
 
 // 5. Insert guarantor record
-$guar_id_front_blob = file_to_blob($guarantor['guarantor_id_front'] ?? null);
-$guar_id_back_blob = file_to_blob($guarantor['guarantor_id_back'] ?? null);
+$guar_id_front_blob = null;
+$guar_id_back_blob = null;
+if (!empty($guarantor['guarantor_id_front']) && file_exists($guarantor['guarantor_id_front'])) {
+    $guar_id_front_blob = file_get_contents($guarantor['guarantor_id_front']);
+}
+if (!empty($guarantor['guarantor_id_back']) && file_exists($guarantor['guarantor_id_back'])) {
+    $guar_id_back_blob = file_get_contents($guarantor['guarantor_id_back']);
+}
 $stmt4 = $conn->prepare("INSERT INTO guarantor (cust_id, full_name, phone_no, id_no, id_front_image, id_back_image, relationship) VALUES (?, ?, ?, ?, ?, ?, ?)");
 $stmt4->bind_param(
     "issssss",
@@ -117,8 +130,8 @@ $stmt4->bind_param(
     $guar_id_back_blob,
     $guarantor['guarantor_relationship']
 );
-$stmt4->send_long_data(4, $guar_id_front_blob);
-$stmt4->send_long_data(5, $guar_id_back_blob);
+if ($guar_id_front_blob !== null) $stmt4->send_long_data(4, $guar_id_front_blob);
+if ($guar_id_back_blob !== null) $stmt4->send_long_data(5, $guar_id_back_blob);
 $stmt4->execute();
 if ($stmt4->error) {
     die('Guarantor insert error: ' . $stmt4->error);
@@ -232,9 +245,9 @@ $admin_id = null; // NULL at this stage
 $agreement_file = file_get_contents($pdf_path);
 
 $stmt5 = $conn->prepare("INSERT INTO agreement_form (booking_id, customer_id, guarantor_id, admin_id, agreement_file_path, cust_signature) VALUES (?, ?, ?, ?, ?, ?)");
-$stmt5->bind_param("iiiiss", $booking_id, $cust_id, $guarantor_id, $admin_id, $agreement_file, $signature_binary);
-$stmt5->send_long_data(4, $agreement_file);
-$stmt5->send_long_data(5, $signature_binary);
+$stmt5->bind_param("iiiibb", $booking_id, $cust_id, $guarantor_id, $admin_id, $agreement_file, $signature_binary);
+if ($agreement_file !== null) $stmt5->send_long_data(4, $agreement_file);
+if ($signature_binary !== null) $stmt5->send_long_data(5, $signature_binary);
 $stmt5->execute();
 if ($stmt5->error) {
     die('Agreement form insert error: ' . $stmt5->error);

@@ -130,6 +130,7 @@ if (!$user) {
         </div>
     </div>
     <a class="profile-edit-btn" href="edit_profile.php">Edit Profile</a>
+    <button class="back-btn" onclick="window.history.back()" style="width:100%;margin-top:18px;background:#c2c7d6;color:#2f377d;border:none;padding:11px 0;border-radius:8px;font-size:1.08em;font-weight:600;cursor:pointer;text-align:center;transition:background 0.18s, color 0.18s;">Back</button>
 </div>
 
 <?php include '../includes/footer.php'; ?>

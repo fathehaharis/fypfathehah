@@ -33,10 +33,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['car_id'])) {
 
 // Pre-fill from customer table if possible
 $cust_id = $_SESSION['cust_id'];
-$stmt = $conn->prepare("SELECT full_name, phone_no, email, license_no, id_no, address, age FROM customer WHERE cust_id = ?");
+$stmt = $conn->prepare("SELECT full_name, phone_no, email, license_no, id_no, address, age, id_front_image, id_back_image FROM customer WHERE cust_id = ?");
 $stmt->bind_param("i", $cust_id);
 $stmt->execute();
-$stmt->bind_result($full_name, $phone_no, $email, $license_no, $id_no, $address, $age);
+$stmt->bind_result($full_name, $phone_no, $email, $license_no, $id_no, $address, $age, $id_front_image, $id_back_image);
 $stmt->fetch();
 $stmt->close();
 ?>
@@ -112,6 +112,14 @@ input[type="file"] {padding: 4px 0;}
     margin-top: 28px;
     text-align: right;
 }
+.img-preview {
+    display: block;
+    margin-bottom: 7px;
+    max-width: 120px;
+    max-height: 80px;
+    border: 1px solid #aaa;
+    border-radius: 6px;
+}
 </style>
 
 <div class="form-section">
@@ -135,11 +143,23 @@ input[type="file"] {padding: 4px 0;}
         </div>
         <div class="input-row">
             <label class="input-label">ID Front Image<span class="required-star">*</span></label>
-            <input type="file" name="driver_id_front" accept="image/*" required>
+            <?php if (!empty($id_front_image)): ?>
+                <img class="img-preview" src="data:image/jpeg;base64,<?= base64_encode($id_front_image) ?>" alt="ID Front Image" />
+                <input type="file" name="driver_id_front" accept="image/*">
+                <small>If you want to update, select a new file. Otherwise, leave empty.</small>
+            <?php else: ?>
+                <input type="file" name="driver_id_front" accept="image/*" required>
+            <?php endif; ?>
         </div>
         <div class="input-row">
             <label class="input-label">ID Back Image<span class="required-star">*</span></label>
-            <input type="file" name="driver_id_back" accept="image/*" required>
+            <?php if (!empty($id_back_image)): ?>
+                <img class="img-preview" src="data:image/jpeg;base64,<?= base64_encode($id_back_image) ?>" alt="ID Back Image" />
+                <input type="file" name="driver_id_back" accept="image/*">
+                <small>If you want to update, select a new file. Otherwise, leave empty.</small>
+            <?php else: ?>
+                <input type="file" name="driver_id_back" accept="image/*" required>
+            <?php endif; ?>
         </div>
         <div class="input-row">
             <label class="input-label">License Number<span class="required-star">*</span></label>
