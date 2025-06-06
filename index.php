@@ -3,6 +3,7 @@ include 'connect.php';
 
 // No navbar for a clean landing page
 ?>
+<link rel="icon" type="image/png" href="/assets/images/TimeLess_logo.png">
 <link rel="stylesheet" href="/assets/css/style.css">
 
 <div class="landing-container">

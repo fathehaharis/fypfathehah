@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <title>TimeLess Car Rental System</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="icon" type="image/png" href="/assets/images/TimeLess_logo.png">
     <link rel="stylesheet" href="/assets/css/style.css">
     <link href="https://fonts.googleapis.com/css?family=Montserrat:700,400&display=swap" rel="stylesheet">
     <style>
@@ -165,6 +166,8 @@
         </button>
         <div class="profile-menu">
           <a href="/customer/profile.php">Profile</a>
+          <a href="/customer/bookings.php">My Bookings</a>
+          <a href="/customer/dashboard.php">Dashboard</a>
           <a href="/customer/logout.php" class="logout-link">Logout</a>
         </div>
       </div>

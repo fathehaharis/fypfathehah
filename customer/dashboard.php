@@ -124,7 +124,7 @@ $result = $conn->query($sql);
             <div class="car-title"><?= htmlspecialchars($car['car_brand'] . ' ' . $car['car_model']) ?></div>
             <div class="car-plate">Plate: <?= htmlspecialchars($car['plate_no']) ?></div>
             <div class="car-rate">RM <?= number_format($car['daily_rate'], 2) ?> / day</div>
-            <a class="book-btn" href="booking_wizard.php?car_id=<?= $car['car_id'] ?>">Book Now</a>
+            <a class="book-btn" href="book_car.php?car_id=<?= $car['car_id'] ?>">Book Now</a>
         </div>
     <?php endwhile; ?>
 <?php else: ?>
