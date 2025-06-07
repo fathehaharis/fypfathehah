@@ -1,7 +1,6 @@
 <?php
 include 'connect.php';
-
-// No navbar for a clean landing page
+session_start(); // Make sure session is started to access session variables
 ?>
 <link rel="icon" type="image/png" href="/assets/images/TimeLess_logo.png">
 <link rel="stylesheet" href="/assets/css/style.css">
@@ -23,6 +22,17 @@ include 'connect.php';
   <div class="landing-login-box">
     <h2>Welcome back.</h2>
     <p class="login-desc">Enter your email and password to login.</p>
+    <?php
+    // Display login errors if any
+    if (!empty($_SESSION['login_errors'])) {
+        echo '<div class="error-messages">';
+        foreach ($_SESSION['login_errors'] as $error) {
+            echo '<p>' . htmlspecialchars($error) . '</p>';
+        }
+        echo '</div>';
+        unset($_SESSION['login_errors']);
+    }
+    ?>
     <form action="customer/login.php" method="post" class="login-form">
       <input type="text" name="username" placeholder="Email or Username" required>
       <input type="password" name="password" placeholder="Password" required>

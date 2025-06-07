@@ -303,3 +303,12 @@ body {
         max-width: 98vw;
     }
 }
+
+.error-messages {
+    background: #ffe0e0;
+    color: #a80000;
+    border: 1px solid #a80000;
+    padding: 10px;
+    margin-bottom: 10px;
+    border-radius: 5px;
+}
