@@ -1,14 +1,7 @@
 <?php
 include '../connect.php';
 session_start();
-if (!empty($_SESSION['login_errors'])) {
-    echo '<div class="error-messages"><ul>';
-    foreach ($_SESSION['login_errors'] as $error) {
-        echo '<li>' . htmlspecialchars($error) . '</li>';
-    }
-    echo '</ul></div>';
-    unset($_SESSION['login_errors']);
-}
+
 $errors = [];
 
 // Handle login form submission
