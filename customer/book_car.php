@@ -16,7 +16,7 @@ if ($car_id <= 0) {
     exit;
 }
 
-// Fetch car details
+// Fetch car details (now includes hourly_rate)
 $sql = "
     SELECT c.*, 
         COALESCE(main_img.car_image_id, any_img.car_image_id) AS car_image_id
@@ -76,6 +76,7 @@ $pickup_time  = isset($booking_data['pickup_datetime']) ? substr($booking_data['
 $return_date  = isset($booking_data['return_datetime']) ? substr($booking_data['return_datetime'], 0, 10) : '';
 $return_time  = isset($booking_data['return_datetime']) ? substr($booking_data['return_datetime'], 11, 5) : '';
 $delivery_type = $booking_data['delivery_type'] ?? '';
+$notes = $booking_data['notes'] ?? '';
 ?>
 <link rel="stylesheet" href="/assets/css/style.css">
 <style>
@@ -244,7 +245,10 @@ window.addEventListener('DOMContentLoaded', function() {
     // Disable unavailable dates in the pickup and return date pickers
     const pickupDateInput = document.querySelector('input[name="pickup_date"]');
     const returnDateInput = document.querySelector('input[name="return_date"]');
-    
+    const deliveryTypeSelect = document.querySelector('select[name="delivery_type"]');
+    const notesRow = document.getElementById('notes-row');
+    const notesInput = document.querySelector('textarea[name="notes"]');
+
     function validateDate(input) {
         input.addEventListener('change', function() {
             if (isDateUnavailable(this.value)) {
@@ -261,6 +265,21 @@ window.addEventListener('DOMContentLoaded', function() {
     const today = new Date().toISOString().split('T')[0];
     pickupDateInput.setAttribute('min', today);
     returnDateInput.setAttribute('min', today);
+
+    // Show/hide notes row based on delivery type
+    function updateNotesVisibility() {
+        if (deliveryTypeSelect.value === 'delivery' || deliveryTypeSelect.value === 'pickup_and_return') {
+            notesRow.style.display = "";
+            notesInput.required = true;
+        } else {
+            notesRow.style.display = "none";
+            notesInput.required = false;
+            notesInput.value = "";
+        }
+    }
+
+    deliveryTypeSelect.addEventListener('change', updateNotesVisibility);
+    updateNotesVisibility();
 });
 </script>
 
@@ -282,6 +301,7 @@ window.addEventListener('DOMContentLoaded', function() {
             <tr><th>Seat Capacity:</th>  <td><?= htmlspecialchars($car['seat_capacity']) ?></td></tr>
             <tr><th>Mileage:</th>        <td><?= htmlspecialchars($car['mileage']) ?> km</td></tr>
             <tr><th>Daily Rate:</th>     <td>RM <?= number_format($car['daily_rate'], 2) ?></td></tr>
+            <tr><th>Hourly Rate:</th>    <td>RM <?= number_format($car['hourly_rate'], 2) ?></td></tr>
         </table>
 
         <form action="booking_driver.php" method="POST" style="margin-bottom:0;">
@@ -336,6 +356,12 @@ window.addEventListener('DOMContentLoaded', function() {
                             <option value="delivery" <?= $delivery_type === "delivery" ? "selected" : "" ?>>Deliver car to me (+RM10)</option>
                             <option value="pickup_and_return" <?= $delivery_type === "pickup_and_return" ? "selected" : "" ?>>Deliver &amp; return pickup (+RM30)</option>
                         </select>
+                    </td>
+                </tr>
+                <tr id="notes-row" style="display:none;">
+                    <th>Delivery Location:<span class="required-star">*</span></th>
+                    <td>
+                        <textarea name="notes" rows="2" placeholder="Enter your delivery location"><?= htmlspecialchars($notes) ?></textarea>
                     </td>
                 </tr>
             </table>

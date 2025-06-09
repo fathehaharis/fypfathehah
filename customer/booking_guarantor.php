@@ -6,56 +6,58 @@ if (!isset($_SESSION['cust_id'])) {
 }
 
 include '../connect.php';
-include '../includes/header.php';
 
-// Ensure previous (driver) data exists
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['driver_full_name'])) {
-    // Save driver details from previous form to session
-    $_SESSION['driver_data'] = [
-        'driver_full_name'   => $_POST['driver_full_name'] ?? '',
-        'driver_phone_no'    => $_POST['driver_phone_no'] ?? '',
-        'driver_email'       => $_POST['driver_email'] ?? '',
-        'driver_id_no'       => $_POST['driver_id_no'] ?? '',
-        'driver_license_no'  => $_POST['driver_license_no'] ?? '',
-        'driver_address'     => $_POST['driver_address'] ?? '',
-        'driver_age'         => $_POST['driver_age'] ?? '',
-    ];
-    // Handle uploaded images (store in session temporarily as file paths)
-    if (isset($_FILES['driver_id_front']) && $_FILES['driver_id_front']['error'] === UPLOAD_ERR_OK) {
-        $tmpName = $_FILES['driver_id_front']['tmp_name'];
-        $name = uniqid('idfront_') . '_' . basename($_FILES['driver_id_front']['name']);
-        $dest = sys_get_temp_dir() . '/' . $name;
-        move_uploaded_file($tmpName, $dest);
-        $_SESSION['driver_data']['driver_id_front'] = $dest;
-    }
-    if (isset($_FILES['driver_id_back']) && $_FILES['driver_id_back']['error'] === UPLOAD_ERR_OK) {
-        $tmpName = $_FILES['driver_id_back']['tmp_name'];
-        $name = uniqid('idback_') . '_' . basename($_FILES['driver_id_back']['name']);
-        $dest = sys_get_temp_dir() . '/' . $name;
-        move_uploaded_file($tmpName, $dest);
-        $_SESSION['driver_data']['driver_id_back'] = $dest;
-    }
-} elseif (!isset($_SESSION['driver_data'])) {
+// Ensure driver data exists before proceeding
+if (!isset($_SESSION['driver_id'])) {
     header("Location: booking_driver.php");
     exit;
 }
 
-// When coming from review_booking or after submit, save POST to session
+$errors = [];
+// On POST, save guarantor info and image file paths to session, then redirect to review
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['guarantor_full_name'])) {
     $_SESSION['guarantor_data'] = [
-        'guarantor_full_name' => $_POST['guarantor_full_name'] ?? '',
-        'guarantor_phone_no' => $_POST['guarantor_phone_no'] ?? '',
-        'guarantor_id_no' => $_POST['guarantor_id_no'] ?? '',
-        'guarantor_relationship' => $_POST['guarantor_relationship'] ?? '',
+        'guarantor_full_name'      => $_POST['guarantor_full_name'] ?? '',
+        'guarantor_phone_no'       => $_POST['guarantor_phone_no'] ?? '',
+        'guarantor_id_no'          => $_POST['guarantor_id_no'] ?? '',
+        'guarantor_relationship'   => $_POST['guarantor_relationship'] ?? '',
     ];
-    // handle file uploads for ID images if needed
+
+    // Handle file uploads for ID images (store temp file paths in session)
+    if (isset($_FILES['guarantor_id_front']) && $_FILES['guarantor_id_front']['error'] === UPLOAD_ERR_OK) {
+        $tmpName = $_FILES['guarantor_id_front']['tmp_name'];
+        $name = uniqid('g_idfront_') . '_' . basename($_FILES['guarantor_id_front']['name']);
+        $dest = sys_get_temp_dir() . '/' . $name;
+        move_uploaded_file($tmpName, $dest);
+        $_SESSION['guarantor_data']['guarantor_id_front'] = $dest;
+    } else {
+        $errors[] = "ID Front Image is required.";
+    }
+    if (isset($_FILES['guarantor_id_back']) && $_FILES['guarantor_id_back']['error'] === UPLOAD_ERR_OK) {
+        $tmpName = $_FILES['guarantor_id_back']['tmp_name'];
+        $name = uniqid('g_idback_') . '_' . basename($_FILES['guarantor_id_back']['name']);
+        $dest = sys_get_temp_dir() . '/' . $name;
+        move_uploaded_file($tmpName, $dest);
+        $_SESSION['guarantor_data']['guarantor_id_back'] = $dest;
+    } else {
+        $errors[] = "ID Back Image is required.";
+    }
+    // Only redirect if no errors
+    if (empty($errors)) {
+        header("Location: review_booking.php");
+        exit;
+    }
 }
 
-// Prefill variables from session if exists
-$guarantor_full_name = $_SESSION['guarantor_data']['guarantor_full_name'] ?? '';
-$guarantor_phone_no = $_SESSION['guarantor_data']['guarantor_phone_no'] ?? '';
-$guarantor_id_no = $_SESSION['guarantor_data']['guarantor_id_no'] ?? '';
+// Prefill values from session if available
+$guarantor_full_name    = $_SESSION['guarantor_data']['guarantor_full_name'] ?? '';
+$guarantor_phone_no     = $_SESSION['guarantor_data']['guarantor_phone_no'] ?? '';
+$guarantor_id_no        = $_SESSION['guarantor_data']['guarantor_id_no'] ?? '';
 $guarantor_relationship = $_SESSION['guarantor_data']['guarantor_relationship'] ?? '';
+$car_id = $_SESSION['booking_data']['car_id'] ?? '';
+
+// Only include HTML/output after all possible redirects
+include '../includes/header.php';
 ?>
 
 <link rel="stylesheet" href="/assets/css/style.css">
@@ -89,7 +91,7 @@ $guarantor_relationship = $_SESSION['guarantor_data']['guarantor_relationship'] 
     font-weight: bold;
     font-size: 1.1em;
 }
-input[type="text"], input[type="email"], input[type="file"], select {
+input[type="text"], input[type="file"], select {
     width: 100%;
     padding: 7px 8px;
     border-radius: 5px;
@@ -121,6 +123,8 @@ input[type="file"] {padding: 4px 0;}
     font-weight: 600;
     cursor: pointer;
     transition: background 0.18s;
+    text-decoration: none;
+    display: inline-block;
 }
 .back-btn:hover {
     background: #bbb;
@@ -129,11 +133,26 @@ input[type="file"] {padding: 4px 0;}
     margin-top: 28px;
     text-align: right;
 }
+.error-message {
+    background: #ffe0e0;
+    color: #a80000;
+    border: 1px solid #a80000;
+    padding: 10px;
+    margin-bottom: 15px;
+    border-radius: 5px;
+}
 </style>
 
 <div class="form-section">
     <div class="form-title">Guarantor's Details</div>
-    <form action="review_booking.php" method="POST" enctype="multipart/form-data">
+    <?php if (!empty($errors)): ?>
+        <div class="error-message">
+            <?php foreach ($errors as $error): ?>
+                <div><?= htmlspecialchars($error) ?></div>
+            <?php endforeach; ?>
+        </div>
+    <?php endif; ?>
+    <form action="booking_guarantor.php" method="POST" enctype="multipart/form-data">
         <div class="input-row">
             <label class="input-label">Full Name<span class="required-star">*</span></label>
             <input type="text" name="guarantor_full_name" value="<?= htmlspecialchars($guarantor_full_name) ?>" required>
@@ -159,7 +178,7 @@ input[type="file"] {padding: 4px 0;}
             <input type="text" name="guarantor_relationship" value="<?= htmlspecialchars($guarantor_relationship) ?>" required>
         </div>
         <div class="btn-row">
-            <button type="button" class="back-btn" onclick="window.history.back();">Back</button>
+            <a href="booking_driver.php?car_id=<?= htmlspecialchars($car_id) ?>" class="back-btn">Back</a>
             <button type="submit" class="next-btn">Next</button>
         </div>
     </form>

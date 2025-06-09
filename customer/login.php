@@ -6,26 +6,23 @@ $errors = [];
 
 // Handle login form submission
 if ($_SERVER["REQUEST_METHOD"] === "POST") {
-    $username = trim($_POST['username'] ?? '');
+    $username_or_email = trim($_POST['username'] ?? '');
     $password = $_POST['password'] ?? '';
 
-    if (!$username || !$password) {
+    if (!$username_or_email || !$password) {
         $errors[] = "Please enter both username/email and password.";
     } else {
         // Check if user exists by username or email
         $stmt = $conn->prepare("SELECT cust_id, username, password FROM customer WHERE username = ? OR email = ?");
-        $stmt->bind_param("ss", $username, $username);
+        $stmt->bind_param("ss", $username_or_email, $username_or_email);
         $stmt->execute();
-        $stmt->store_result();
-        if ($stmt->num_rows === 1) {
-            $stmt->bind_result($cust_id, $db_username, $db_password);
-            $stmt->fetch();
-
-            if (password_verify($password, $db_password)) {
+        $result = $stmt->get_result();
+        if ($user = $result->fetch_assoc()) {
+            if (password_verify($password, $user['password'])) {
                 // Password correct, log in user
-                $_SESSION['cust_id'] = $cust_id;
-                $_SESSION['username'] = $db_username;
-                header("Location: dashboard.php"); // Change to your dashboard page
+                $_SESSION['cust_id'] = $user['cust_id'];
+                $_SESSION['username'] = $user['username'];
+                header("Location: dashboard.php"); // Adjust path if needed
                 exit;
             } else {
                 $errors[] = "Incorrect password.";

@@ -7,16 +7,24 @@ if (!isset($_SESSION['cust_id'])) {
 include '../connect.php';
 include '../includes/header.php';
 
-// Ensure driver and guarantor data exist
+// Ensure all prior booking steps exist
+if (
+    empty($_SESSION['booking_data']) ||
+    empty($_SESSION['driver_data']) ||
+    empty($_SESSION['guarantor_data'])
+) {
+    header("Location: book_car.php");
+    exit;
+}
+
+// If POST with new guarantor data (unlikely here, but left from your logic)
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['guarantor_full_name'])) {
-    // Store guarantor data in session (to be used in final booking_submit.php)
     $_SESSION['guarantor_data'] = [
         'guarantor_full_name'    => $_POST['guarantor_full_name'] ?? '',
         'guarantor_phone_no'     => $_POST['guarantor_phone_no'] ?? '',
         'guarantor_id_no'        => $_POST['guarantor_id_no'] ?? '',
         'guarantor_relationship' => $_POST['guarantor_relationship'] ?? '',
     ];
-    // Handle uploaded images (store in session temporarily as file paths)
     if (isset($_FILES['guarantor_id_front']) && $_FILES['guarantor_id_front']['error'] === UPLOAD_ERR_OK) {
         $tmpName = $_FILES['guarantor_id_front']['tmp_name'];
         $name = uniqid('guar_idfront_') . '_' . basename($_FILES['guarantor_id_front']['name']);
@@ -31,9 +39,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['guarantor_full_name']
         move_uploaded_file($tmpName, $dest);
         $_SESSION['guarantor_data']['guarantor_id_back'] = $dest;
     }
-} elseif (!isset($_SESSION['guarantor_data'])) {
-    header("Location: booking_guarantor.php");
-    exit;
 }
 
 // Terms text for agreement

@@ -3,32 +3,7 @@ session_start();
 include '../connect.php';
 include '../includes/header.php';
 
-// 1. Handle guarantor POST from previous form (booking_guarantor.php)
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['guarantor_full_name'])) {
-    $_SESSION['guarantor_data'] = [
-        'guarantor_full_name'     => $_POST['guarantor_full_name'] ?? '',
-        'guarantor_phone_no'      => $_POST['guarantor_phone_no'] ?? '',
-        'guarantor_id_no'         => $_POST['guarantor_id_no'] ?? '',
-        'guarantor_relationship'  => $_POST['guarantor_relationship'] ?? '',
-    ];
-    // Handle uploaded images (store in session as temp file paths)
-    if (isset($_FILES['guarantor_id_front']) && $_FILES['guarantor_id_front']['error'] === UPLOAD_ERR_OK) {
-        $tmpName = $_FILES['guarantor_id_front']['tmp_name'];
-        $name = uniqid('guarfront_') . '_' . basename($_FILES['guarantor_id_front']['name']);
-        $dest = sys_get_temp_dir() . '/' . $name;
-        move_uploaded_file($tmpName, $dest);
-        $_SESSION['guarantor_data']['guarantor_id_front'] = $dest;
-    }
-    if (isset($_FILES['guarantor_id_back']) && $_FILES['guarantor_id_back']['error'] === UPLOAD_ERR_OK) {
-        $tmpName = $_FILES['guarantor_id_back']['tmp_name'];
-        $name = uniqid('guarback_') . '_' . basename($_FILES['guarantor_id_back']['name']);
-        $dest = sys_get_temp_dir() . '/' . $name;
-        move_uploaded_file($tmpName, $dest);
-        $_SESSION['guarantor_data']['guarantor_id_back'] = $dest;
-    }
-}
-
-// 2. Ensure all session data is present
+// 1. Ensure all session data is present
 $booking = $_SESSION['booking_data'] ?? [];
 $driver = $_SESSION['driver_data'] ?? [];
 $guarantor = $_SESSION['guarantor_data'] ?? [];
@@ -38,37 +13,67 @@ if (!$booking || !$driver || !$guarantor) {
     exit;
 }
 
-// 3. Get car details from DB
+// 2. Get car details from DB, including hourly_rate
 $car_id = $booking['car_id'];
-$stmt = $conn->prepare("SELECT car_brand, car_model, daily_rate FROM car WHERE car_id = ?");
+$stmt = $conn->prepare("SELECT car_brand, car_model, daily_rate, hourly_rate FROM car WHERE car_id = ?");
 $stmt->bind_param("i", $car_id);
 $stmt->execute();
 $car = $stmt->get_result()->fetch_assoc();
+$stmt->close();
 
-// 4. Price calculation
-$booking_duration = $booking['booking_duration'] ?? null;
-if (!$booking_duration) {
-    // If not previously calculated, calculate from pickup and return datetime
-    $pickup = new DateTime($booking['pickup_datetime']);
-    $return = new DateTime($booking['return_datetime']);
-    $diff = $pickup->diff($return);
-    $booking_duration = max(1, (int)$diff->format('%a'));
-    $_SESSION['booking_data']['booking_duration'] = $booking_duration;
+// 3. Get customer email from DB (if needed)
+$email = "-";
+if (isset($_SESSION['cust_id'])) {
+    $stmt = $conn->prepare("SELECT email FROM customer WHERE cust_id = ?");
+    $stmt->bind_param("i", $_SESSION['cust_id']);
+    $stmt->execute();
+    $stmt->bind_result($email);
+    $stmt->fetch();
+    $stmt->close();
 }
+
+// 4. Calculate duration and determine mixed daily+hourly
+$pickup = new DateTime($booking['pickup_datetime']);
+$return = new DateTime($booking['return_datetime']);
+$interval = $pickup->diff($return);
+$total_hours = ($interval->days * 24) + $interval->h + ($interval->i > 0 ? 1 : 0);
+
+$full_days = floor($total_hours / 24);
+$leftover_hours = $total_hours % 24;
+
+$daily_rate = $car['daily_rate'];
+$hourly_rate = $car['hourly_rate'];
+
+$subtotal = ($full_days * $daily_rate) + ($leftover_hours * $hourly_rate);
+
+$booking_duration = $full_days;
+$booking_leftover_hours = $leftover_hours;
+$_SESSION['booking_data']['booking_duration'] = $booking_duration;
+$_SESSION['booking_data']['booking_leftover_hours'] = $booking_leftover_hours;
+
+// 5. Delivery fee and total
 $delivery_type = $booking['delivery_type'];
 $delivery_fee = 0;
 if ($delivery_type === 'delivery') $delivery_fee = 10.00;
 elseif ($delivery_type === 'pickup_and_return') $delivery_fee = 30.00;
 
-$car_total = $car['daily_rate'] * $booking_duration;
-$total_price = $car_total + $delivery_fee;
+$total_price = $subtotal + $delivery_fee;
 $_SESSION['booking_data']['total_price'] = $total_price;
+
+// 6. Delivery location/notes (from booking_data['notes'])
+$delivery_location = '';
+if (
+    ($delivery_type === 'delivery' || $delivery_type === 'pickup_and_return') 
+    && !empty($booking['notes'])
+) {
+    $delivery_location = $booking['notes'];
+}
 ?>
 <link rel="stylesheet" href="/assets/css/style.css">
 <style>
 body { background: #eceef4; }
 .review-section {
-    max-width: 600px;
+    max-width: 680px;
     margin: 40px auto;
     background: #fff;
     border-radius: 13px;
@@ -123,13 +128,32 @@ body { background: #eceef4; }
     <div class="section-label">Car & Booking Details</div>
     <table class="review-table">
         <tr><th>Car</th><td><?= htmlspecialchars($car['car_brand'].' '.$car['car_model']) ?></td></tr>
-        <tr><th>Daily Rate</th><td>RM <?= number_format($car['daily_rate'],2) ?></td></tr>
+        <tr>
+            <th>Rental Type</th>
+            <td>
+                <?php
+                if ($full_days > 0 && $leftover_hours > 0) echo "Daily + Hourly";
+                elseif ($full_days > 0) echo "Daily";
+                else echo "Hourly";
+                ?>
+            </td>
+        </tr>
+        <?php if ($full_days > 0): ?>
+        <tr><th>Daily Rate</th><td>RM <?= number_format($daily_rate,2) ?></td></tr>
+        <tr><th>Daily Count</th><td><?= $full_days ?> daily(s)</td></tr>
+        <?php endif; ?>
+        <?php if ($leftover_hours > 0): ?>
+        <tr><th>Hourly Rate</th><td>RM <?= number_format($hourly_rate,2) ?></td></tr>
+        <tr><th>Hourly Count</th><td><?= $leftover_hours ?> hour(s)</td></tr>
+        <?php endif; ?>
         <tr><th>Pickup</th><td><?= htmlspecialchars($booking['pickup_datetime']) ?></td></tr>
         <tr><th>Return</th><td><?= htmlspecialchars($booking['return_datetime']) ?></td></tr>
-        <tr><th>Duration</th><td><?= $booking_duration ?> day(s)</td></tr>
         <tr><th>Delivery Type</th><td><?= htmlspecialchars(ucwords(str_replace('_',' ', $delivery_type))) ?></td></tr>
         <tr><th>Delivery Fee</th><td>RM <?= number_format($delivery_fee,2) ?></td></tr>
-        <tr><th>Subtotal</th><td>RM <?= number_format($car_total,2) ?></td></tr>
+        <?php if ($delivery_location): ?>
+        <tr><th>Delivery Location</th><td><?= htmlspecialchars($delivery_location) ?></td></tr>
+        <?php endif; ?>
+        <tr><th>Subtotal</th><td>RM <?= number_format($subtotal,2) ?></td></tr>
         <tr>
             <th class="total">Total Amount</th>
             <td class="total">RM <?= number_format($total_price,2) ?></td>
@@ -137,13 +161,12 @@ body { background: #eceef4; }
     </table>
     <div class="section-label">Driver (Customer)</div>
     <table class="review-table">
-        <tr><th>Name</th><td><?= htmlspecialchars($driver['driver_full_name']) ?></td></tr>
-        <tr><th>Phone</th><td><?= htmlspecialchars($driver['driver_phone_no']) ?></td></tr>
-        <tr><th>Email</th><td><?= htmlspecialchars($driver['driver_email']) ?></td></tr>
-        <tr><th>ID No</th><td><?= htmlspecialchars($driver['driver_id_no']) ?></td></tr>
-        <tr><th>License No</th><td><?= htmlspecialchars($driver['driver_license_no']) ?></td></tr>
-        <tr><th>Address</th><td><?= htmlspecialchars($driver['driver_address']) ?></td></tr>
-        <tr><th>Age</th><td><?= htmlspecialchars($driver['driver_age']) ?></td></tr>
+        <tr><th>Name</th><td><?= htmlspecialchars($driver['full_name']) ?></td></tr>
+        <tr><th>Phone</th><td><?= htmlspecialchars($driver['phone_no']) ?></td></tr>
+        <tr><th>ID No</th><td><?= htmlspecialchars($driver['id_no']) ?></td></tr>
+        <tr><th>License No</th><td><?= htmlspecialchars($driver['license_no']) ?></td></tr>
+        <tr><th>Address</th><td><?= htmlspecialchars($driver['address']) ?></td></tr>
+        <tr><th>Age</th><td><?= htmlspecialchars($driver['age']) ?></td></tr>
     </table>
     <div class="section-label">Guarantor</div>
     <table class="review-table">
