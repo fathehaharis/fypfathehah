@@ -100,7 +100,11 @@ foreach ($services as $s) {
         $delivery_fee = (float)$s['fee'];
     }
 }
-$total_price = $subtotal + $total_services_fee;
+
+// Get security deposit from booking, fallback to 100 if not set
+$security_deposit = isset($booking['security_deposit']) ? (float)$booking['security_deposit'] : 100.00;
+
+$total_price = $subtotal + $total_services_fee + $security_deposit;
 
 ?>
 <link rel="stylesheet" href="/assets/css/style.css">
@@ -205,6 +209,10 @@ body { background: #eceef4; }
         <tr><th>Delivery Type</th><td><?= htmlspecialchars($delivery_type_display) ?></td></tr>
         <tr><th>Delivery Fee</th><td>RM <?= number_format($delivery_fee,2) ?></td></tr>
         <tr><th>Subtotal</th><td>RM <?= number_format($subtotal,2) ?></td></tr>
+        <tr>
+            <th>Security Deposit</th>
+            <td>RM <?= number_format($security_deposit,2) ?></td>
+        </tr>
         <tr>
             <th class="total">Total Amount</th>
             <td class="total">RM <?= number_format($total_price,2) ?></td>

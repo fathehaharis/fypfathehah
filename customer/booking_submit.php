@@ -67,10 +67,15 @@ $delivery_fee = 0;
 if ($delivery_type !== "self_pickup") {
     $delivery_fee = ($delivery_type === "delivery") ? 10.00 : 30.00;
 }
-$total_price = $subtotal + $delivery_fee;
+
+// 5. Security Deposit (fixed at RM100)
+$security_deposit = 100.00;
+
+// 6. Grand total includes security deposit
+$total_price = $subtotal + $delivery_fee + $security_deposit;
 $status = 'pending';
 
-// 5. Insert driver info into driver table, get driver_id
+// 7. Insert driver info into driver table, get driver_id
 $id_front_blob = isset($driver['id_front']) && !empty($driver['id_front']) && file_exists($driver['id_front']) 
     ? file_get_contents($driver['id_front'])
     : null;
@@ -100,11 +105,11 @@ if ($stmt_driver->error) die('Driver insert error: ' . $stmt_driver->error);
 $driver_id = $stmt_driver->insert_id;
 $stmt_driver->close();
 
-// 6. Insert booking record, referencing driver_id
+// 8. Insert booking record, referencing driver_id
 $stmt = $conn->prepare("INSERT INTO booking
-    (cust_id, driver_id, car_id, pickup_datetime, return_datetime, day_count, hour_count, daily_rate, hourly_rate, total_price, status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-$stmt->bind_param("iiissiiddds",
+    (cust_id, driver_id, car_id, pickup_datetime, return_datetime, day_count, hour_count, daily_rate, hourly_rate, total_price, security_deposit, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+$stmt->bind_param("iiissiidddds",
     $cust_id,
     $driver_id,
     $car_id,
@@ -115,6 +120,7 @@ $stmt->bind_param("iiissiiddds",
     $daily_rate,
     $hourly_rate,
     $total_price,
+    $security_deposit,
     $status
 );
 $stmt->execute();
@@ -122,7 +128,7 @@ if ($stmt->error) die('Booking insert error: ' . $stmt->error);
 $booking_id = $stmt->insert_id;
 $stmt->close();
 
-// 7. Insert service (delivery/pickup info)
+// 9. Insert service (delivery/pickup info)
 if ($delivery_type !== "self_pickup") {
     $fee = ($delivery_type === "delivery") ? 10.00 : 30.00;
     $notes = $booking['notes'] ?? null;
@@ -135,7 +141,7 @@ if ($delivery_type !== "self_pickup") {
     $stmt2->close();
 }
 
-// 8. Insert guarantor record
+// 10. Insert guarantor record
 $guar_id_front_blob = isset($guarantor['guarantor_id_front']) && !empty($guarantor['guarantor_id_front']) && file_exists($guarantor['guarantor_id_front']) 
     ? file_get_contents($guarantor['guarantor_id_front'])
     : null;
@@ -162,7 +168,7 @@ if ($stmt4->error) {
 $guarantor_id = $stmt4->insert_id;
 $stmt4->close();
 
-// 9. Handle signature image (from base64)
+// 11. Handle signature image (from base64)
 $signature_data = $_POST['signature_data'];
 $signature_binary = base64_decode(preg_replace('#^data:image/\w+;base64,#i', '', $signature_data));
 $signature_dir = '../uploads/signatures/';
@@ -170,7 +176,7 @@ $signature_path = $signature_dir . uniqid('cust_sig_') . '.png';
 if (!is_dir($signature_dir)) mkdir($signature_dir, 0777, true);
 file_put_contents($signature_path, $signature_binary);
 
-// 10. Prepare temp image files for PDF display (from session path or blob)
+// 12. Prepare temp image files for PDF display (from session path or blob)
 $driver_id_front_path = !empty($driver['id_front']) && file_exists($driver['id_front'])
     ? $driver['id_front']
     : (isset($id_front_blob) && $id_front_blob ? blob_to_tempfile($id_front_blob, 'drfront_') : null);
@@ -186,7 +192,7 @@ $guar_id_back_path = !empty($guarantor['guarantor_id_back']) && file_exists($gua
     ? $guarantor['guarantor_id_back']
     : (isset($guar_id_back_blob) && $guar_id_back_blob ? blob_to_tempfile($guar_id_back_blob, 'gback_') : null);
 
-// 11. Generate agreement PDF with TCPDF using DRIVER and GUARANTOR details and images
+// 13. Generate agreement PDF with TCPDF using DRIVER and GUARANTOR details and images
 $agreement_terms = <<<EOT
 AGREEMENT OF VEHICLE USAGE BETWEEN BORROWER AND TIMELESS CAR RENTAL
 
@@ -283,7 +289,7 @@ if (!file_exists($pdf_path)) {
     die('PDF was not created: ' . $pdf_path);
 }
 
-// 12. Insert into agreement_form (store PDF and signature as LONGBLOB)
+// 14. Insert into agreement_form (store PDF and signature as LONGBLOB)
 $admin_id = null; // NULL at this stage
 $agreement_file = file_get_contents($pdf_path);
 
@@ -298,10 +304,10 @@ if ($stmt5->error) {
 $agreement_id = $stmt5->insert_id;
 $stmt5->close();
 
-// 13. Unset sessions
+// 15. Unset sessions
 unset($_SESSION['booking_data'], $_SESSION['driver_data'], $_SESSION['guarantor_data']);
 
-// 14. Clean up temp image files (avoid deleting if original, only temp files)
+// 16. Clean up temp image files (avoid deleting if original, only temp files)
 if (isset($driver['driver_id_front']) && strpos($driver['driver_id_front'], sys_get_temp_dir()) === 0) @unlink($driver['driver_id_front']);
 if (isset($driver['driver_id_back']) && strpos($driver['driver_id_back'], sys_get_temp_dir()) === 0) @unlink($driver['driver_id_back']);
 if (isset($guarantor['guarantor_id_front']) && strpos($guarantor['guarantor_id_front'], sys_get_temp_dir()) === 0) @unlink($guarantor['guarantor_id_front']);
@@ -344,6 +350,24 @@ if (isset($guarantor['guarantor_id_back']) && strpos($guarantor['guarantor_id_ba
     <h2>Booking Submitted!</h2>
     <p>Your booking and agreement have been recorded.<br>
     Please proceed to payment to confirm your reservation.</p>
+    <table class="review-table" style="margin: 0 auto 18px auto; font-size:1.1em;">
+        <tr>
+            <th style="text-align:left;">Subtotal</th>
+            <td style="text-align:right;">RM <?= number_format($subtotal,2) ?></td>
+        </tr>
+        <tr>
+            <th style="text-align:left;">Delivery Fee</th>
+            <td style="text-align:right;">RM <?= number_format($delivery_fee,2) ?></td>
+        </tr>
+        <tr>
+            <th style="text-align:left;">Security Deposit</th>
+            <td style="text-align:right;">RM <?= number_format($security_deposit,2) ?></td>
+        </tr>
+        <tr>
+            <th style="text-align:left;">Total Amount</th>
+            <td style="text-align:right; font-weight:bold; color:#203090;">RM <?= number_format($total_price,2) ?></td>
+        </tr>
+    </table>
     <form action="payment.php" method="post">
         <input type="hidden" name="booking_id" value="<?= htmlspecialchars($booking_id) ?>">
         <button type="submit" class="next-btn">Proceed to Payment</button>

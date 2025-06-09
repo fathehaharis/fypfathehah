@@ -6,7 +6,7 @@ if (!isset($_SESSION['cust_id'])) {
 }
 
 include '../connect.php';
-include '../includes/header.php';
+
 
 $cust_id = $_SESSION['cust_id'];
 
@@ -56,6 +56,7 @@ while ($row = $result->fetch_assoc()) {
     $bookings[$section][] = $row;
 }
 $stmt->close();
+include '../includes/header.php';
 ?>
 <link rel="stylesheet" href="/assets/css/style.css">
 <style>
@@ -369,7 +370,7 @@ document.addEventListener('DOMContentLoaded', function() {
                                         <a class="action-btn view" href="view_booking.php?booking_id=<?= $b['booking_id'] ?>">View</a>
                                         <form action="cancel_booking.php" method="post" style="display:inline;">
                                             <input type="hidden" name="booking_id" value="<?= $b['booking_id'] ?>">
-                                            <button type="submit" class="action-btn cancel" onclick="return confirm('Are you sure you want to cancel this booking?');">Cancel</button>
+                                            <button type="submit" class="action-btn cancel" onclick="return confirm('Are you sure you want to cancel? You will NOT get your deposit back. Any eligible refund will be credited to your account within 3 - 5 days after cancellation.');">Cancel</button>
                                         </form>
                                     <?php elseif ($section == 'Completed'): ?>
                                         <a class="action-btn view" href="view_booking.php?booking_id=<?= $b['booking_id'] ?>">View</a>

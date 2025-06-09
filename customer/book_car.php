@@ -46,14 +46,13 @@ if (!$car) {
     exit;
 }
 
-// Fetch existing bookings for this car (not cancelled), where booking dates are in the future or ongoing
+// Fetch unavailable booking ranges (confirmed/pending bookings in the future)
 $today = date("Y-m-d");
 $booking_sql = "
-    SELECT 
-        pickup_datetime, return_datetime
+    SELECT pickup_datetime, return_datetime
     FROM booking
     WHERE car_id = ?
-      AND status != 'cancelled'
+      AND status IN ('confirmed', 'pending')
       AND DATE(return_datetime) >= ?
 ";
 $booking_stmt = $conn->prepare($booking_sql);
@@ -63,8 +62,8 @@ $booking_result = $booking_stmt->get_result();
 $unavailable_ranges = [];
 while ($row = $booking_result->fetch_assoc()) {
     $unavailable_ranges[] = [
-        'start' => date('Y-m-d', strtotime($row['pickup_datetime'])),
-        'end'   => date('Y-m-d', strtotime($row['return_datetime']))
+        'from' => date('Y-m-d', strtotime($row['pickup_datetime'])),
+        'to'   => date('Y-m-d', strtotime($row['return_datetime']))
     ];
 }
 $booking_stmt->close();
@@ -79,6 +78,11 @@ $delivery_type = $booking_data['delivery_type'] ?? '';
 $notes = $booking_data['notes'] ?? '';
 ?>
 <link rel="stylesheet" href="/assets/css/style.css">
+
+<!-- flatpickr CSS and JS -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
+<script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
+
 <style>
 body { background: #f7f8fa;}
 .car-detail-outer {
@@ -165,7 +169,7 @@ body { background: #f7f8fa;}
 .form-table td {
     padding-bottom: 3px;
 }
-input[type="date"], select, input[type="time"] {
+input[type="date"], select, input[type="time"], input[type="text"].flatpickr-input {
     padding: 7px 10px;
     border-radius: 7px;
     border: 1px solid #bfc8e6;
@@ -173,7 +177,7 @@ input[type="date"], select, input[type="time"] {
     background: #f9fafd;
     margin-right: 8px;
 }
-input[type="date"]:invalid {
+input[type="date"]:invalid, input[type="text"].flatpickr-input:invalid {
     color: #aaa;
 }
 .form-btn-row {
@@ -229,44 +233,30 @@ input[type="date"]:invalid {
 <script>
 const unavailableRanges = <?= json_encode($unavailable_ranges) ?>;
 
-// Helper: returns true if dateString is within any unavailable range
-function isDateUnavailable(dateString) {
-    if (!dateString) return false;
-    const d = new Date(dateString);
-    for (const range of unavailableRanges) {
-        const start = new Date(range.start);
-        const end = new Date(range.end);
-        if (d >= start && d <= end) return true;
-    }
-    return false;
-}
+// Prepare ranges for flatpickr disable
+const flatpickrDisable = unavailableRanges.map(r => {
+    return { from: r.from, to: r.to };
+});
 
 window.addEventListener('DOMContentLoaded', function() {
-    // Disable unavailable dates in the pickup and return date pickers
-    const pickupDateInput = document.querySelector('input[name="pickup_date"]');
-    const returnDateInput = document.querySelector('input[name="return_date"]');
+    // Use flatpickr for the date pickers and disable unavailable ranges
+    flatpickr("input[name='pickup_date']", {
+        minDate: "today",
+        dateFormat: "Y-m-d",
+        disable: flatpickrDisable,
+        allowInput: true
+    });
+    flatpickr("input[name='return_date']", {
+        minDate: "today",
+        dateFormat: "Y-m-d",
+        disable: flatpickrDisable,
+        allowInput: true
+    });
+
+    // Show/hide notes row based on delivery type
     const deliveryTypeSelect = document.querySelector('select[name="delivery_type"]');
     const notesRow = document.getElementById('notes-row');
     const notesInput = document.querySelector('textarea[name="notes"]');
-
-    function validateDate(input) {
-        input.addEventListener('change', function() {
-            if (isDateUnavailable(this.value)) {
-                alert("This date is not available for booking. Please choose another date.");
-                this.value = '';
-            }
-        });
-    }
-
-    validateDate(pickupDateInput);
-    validateDate(returnDateInput);
-
-    // Set min date as today for both pickers
-    const today = new Date().toISOString().split('T')[0];
-    pickupDateInput.setAttribute('min', today);
-    returnDateInput.setAttribute('min', today);
-
-    // Show/hide notes row based on delivery type
     function updateNotesVisibility() {
         if (deliveryTypeSelect.value === 'delivery' || deliveryTypeSelect.value === 'pickup_and_return') {
             notesRow.style.display = "";
@@ -277,7 +267,6 @@ window.addEventListener('DOMContentLoaded', function() {
             notesInput.value = "";
         }
     }
-
     deliveryTypeSelect.addEventListener('change', updateNotesVisibility);
     updateNotesVisibility();
 });
@@ -311,7 +300,7 @@ window.addEventListener('DOMContentLoaded', function() {
                 <tr>
                     <th>Pickup Date:</th>
                     <td>
-                        <input type="date" name="pickup_date" value="<?= htmlspecialchars($pickup_date) ?>" required>
+                        <input type="text" name="pickup_date" value="<?= htmlspecialchars($pickup_date) ?>" required readonly="readonly">
                         <span style="margin-left:10px;margin-right:2px;">Time:</span>
                         <select name="pickup_time" required>
                             <?php
@@ -331,7 +320,7 @@ window.addEventListener('DOMContentLoaded', function() {
                 <tr>
                     <th>Return Date:</th>
                     <td>
-                        <input type="date" name="return_date" value="<?= htmlspecialchars($return_date) ?>" required>
+                        <input type="text" name="return_date" value="<?= htmlspecialchars($return_date) ?>" required readonly="readonly">
                         <span style="margin-left:10px;margin-right:2px;">Time:</span>
                         <select name="return_time" required>
                             <?php

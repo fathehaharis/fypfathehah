@@ -57,7 +57,12 @@ $delivery_fee = 0;
 if ($delivery_type === 'delivery') $delivery_fee = 10.00;
 elseif ($delivery_type === 'pickup_and_return') $delivery_fee = 30.00;
 
-$total_price = $subtotal + $delivery_fee;
+// 6. Security deposit
+$security_deposit = 100.00; // RM100 fixed
+$_SESSION['booking_data']['security_deposit'] = $security_deposit;
+
+// 7. Grand total includes security deposit
+$total_price = $subtotal + $delivery_fee + $security_deposit;
 $_SESSION['booking_data']['total_price'] = $total_price;
 
 // 6. Delivery location/notes (from booking_data['notes'])
@@ -154,6 +159,10 @@ body { background: #eceef4; }
         <tr><th>Delivery Location</th><td><?= htmlspecialchars($delivery_location) ?></td></tr>
         <?php endif; ?>
         <tr><th>Subtotal</th><td>RM <?= number_format($subtotal,2) ?></td></tr>
+        <tr>
+            <th>Security Deposit</th>
+            <td>RM <?= number_format($security_deposit,2) ?></td>
+        </tr>
         <tr>
             <th class="total">Total Amount</th>
             <td class="total">RM <?= number_format($total_price,2) ?></td>
