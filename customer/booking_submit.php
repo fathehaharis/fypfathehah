@@ -71,11 +71,11 @@ $total_price = $subtotal + $delivery_fee;
 $status = 'pending';
 
 // 5. Insert driver info into driver table, get driver_id
-$id_front_blob = isset($driver['driver_id_front']) && !empty($driver['driver_id_front']) && file_exists($driver['driver_id_front']) 
-    ? file_get_contents($driver['driver_id_front'])
+$id_front_blob = isset($driver['id_front']) && !empty($driver['id_front']) && file_exists($driver['id_front']) 
+    ? file_get_contents($driver['id_front'])
     : null;
-$id_back_blob = isset($driver['driver_id_back']) && !empty($driver['driver_id_back']) && file_exists($driver['driver_id_back']) 
-    ? file_get_contents($driver['driver_id_back'])
+$id_back_blob = isset($driver['id_back']) && !empty($driver['id_back']) && file_exists($driver['id_back']) 
+    ? file_get_contents($driver['id_back'])
     : null;
 
 $stmt_driver = $conn->prepare("INSERT INTO driver 
@@ -142,10 +142,10 @@ $guar_id_front_blob = isset($guarantor['guarantor_id_front']) && !empty($guarant
 $guar_id_back_blob = isset($guarantor['guarantor_id_back']) && !empty($guarantor['guarantor_id_back']) && file_exists($guarantor['guarantor_id_back']) 
     ? file_get_contents($guarantor['guarantor_id_back'])
     : null;
-$stmt4 = $conn->prepare("INSERT INTO guarantor (cust_id, full_name, phone_no, id_no, id_front_image, id_back_image, relationship) VALUES (?, ?, ?, ?, ?, ?, ?)");
+$stmt4 = $conn->prepare("INSERT INTO guarantor (driver_id, full_name, phone_no, id_no, id_front_image, id_back_image, relationship) VALUES (?, ?, ?, ?, ?, ?, ?)");
 $stmt4->bind_param(
     "issssss",
-    $cust_id,
+    $driver_id,
     $guarantor['guarantor_full_name'],
     $guarantor['guarantor_phone_no'],
     $guarantor['guarantor_id_no'],
@@ -171,11 +171,12 @@ if (!is_dir($signature_dir)) mkdir($signature_dir, 0777, true);
 file_put_contents($signature_path, $signature_binary);
 
 // 10. Prepare temp image files for PDF display (from session path or blob)
-$driver_id_front_path = !empty($driver['driver_id_front']) && file_exists($driver['driver_id_front'])
-    ? $driver['driver_id_front']
+$driver_id_front_path = !empty($driver['id_front']) && file_exists($driver['id_front'])
+    ? $driver['id_front']
     : (isset($id_front_blob) && $id_front_blob ? blob_to_tempfile($id_front_blob, 'drfront_') : null);
-$driver_id_back_path = !empty($driver['driver_id_back']) && file_exists($driver['driver_id_back'])
-    ? $driver['driver_id_back']
+
+$driver_id_back_path = !empty($driver['id_back']) && file_exists($driver['id_back'])
+    ? $driver['id_back']
     : (isset($id_back_blob) && $id_back_blob ? blob_to_tempfile($id_back_blob, 'drback_') : null);
 
 $guar_id_front_path = !empty($guarantor['guarantor_id_front']) && file_exists($guarantor['guarantor_id_front'])
@@ -186,7 +187,29 @@ $guar_id_back_path = !empty($guarantor['guarantor_id_back']) && file_exists($gua
     : (isset($guar_id_back_blob) && $guar_id_back_blob ? blob_to_tempfile($guar_id_back_blob, 'gback_') : null);
 
 // 11. Generate agreement PDF with TCPDF using DRIVER and GUARANTOR details and images
-$agreement_terms = "AGREEMENT OF VEHICLE USAGE BETWEEN BORROWER AND TIMELESS CAR RENTAL\n... (your terms here) ...";
+$agreement_terms = <<<EOT
+AGREEMENT OF VEHICLE USAGE BETWEEN BORROWER AND TIMELESS CAR RENTAL
+
+TimeLess Car Rental is a brand operated by TimeLess Car Rental. Attached herewith are the terms and conditions that shall be between the BORROWER of the vehicle and TimeLess Car Rental. When the agreement is signed, the BORROWER has acknowledged that he/she has read, understood and agreed to the terms and conditions.
+
+IT IS HEREBY AGREED AS FOLLOWS:
+1. The consolation loan agreed for this vehicle is as per agreed in the quotation. No claim will be made by the BORROWER if the vehicle is returned earlier than the promised expiry date and time.
+2. TimeLess Car Rental reserves the right to claim additional consolation if the vehicle is returned late after the expiry of the LOAN as above. For vehicles with a daily rate of less than RM300, the value claimed is RM25/hour. For vehicles with a daily rate of more than RM300, the claimed value is RM60/hour. TimeLess Car Rental also has the right to exercise discretion in determining the level of demand for this clause (2).
+3. Any loan extension must be notified to TimeLess Car Rental at least 3 hours in advance, subject to the availability of the vehicle. BORROWER agrees to all terms and conditions agreed in this agreement for the duration of the extension period. Only ONE (1) EXTENSION is allowed. For the next loan extension, the BORROWER must be present at the TimeLess Car Rental office with the vehicle for approval.
+4. This vehicle is not used for any kind of criminal activities or offences under the laws of Malaysia.
+5. THE BORROWER is fully responsible in the event of misuse of this vehicle such as being involved in any kind of criminal activities or offences under the laws of Malaysia.
+6. It is a responsibility for the BORROWERS to pay all summonses, compounds, or fines within the LOAN tenure as above.
+7. TimeLess Car Rental reserves the right to claim any compensation in the event of any damage/accident/replacement of spare parts without TimeLess Car Rental's consent involving the vehicle during the LOAN period as above.
+8. If the vehicle is not found/lost/severely damaged after the LOAN period of this vehicle as above, the BORROWER is responsible for all costs and claims incurred by TimeLess Car Rental involving this vehicle.
+9. TimeLess Car Rental reserves the right to request/keep a copy of the Identity Card/Driver's License/Student Card/Employee Card or any supporting documents of this vehicle BORROWER/GUARANTOR for the purpose of further action related to all processes related to the above vehicle rental.
+10. THE BORROWER will be responsible for any issues arising for the duration of the loan if such issues arise after the return of the deposit. TimeLess Car Rental reserves the right to make claims against borrowers to resolve such issues.
+11. The vehicle is provided with full fuel. THE BORROWER is responsible for returning the vehicle in a state of full oil. Failure will entitle TimeLess Car Rental to claim RM100 for refuelling and service charges.
+12. TimeLess Car Rental reserves the right to contact the Guarantor given by the BORROWER for the purpose of resolving any issues arising in relation to the vehicle loan if the BORROWER is unable to resolve the arising issues. This is in line with the consent that has been given by the GUARANTOR.
+13. Only BORROWERs are allowed to drive the above vehicles. Third parties are not allowed to drive the above vehicles.
+14. The BORROWER acknowledges that TimeLess Car Rental does not provide any personal accident and damage/loss of property insurance to the BORROWER. The BORROWER is solely responsible for the personal safety and property of the BORROWER.
+15. THE BORROWER AND GUARANTOR testified and acknowledge that the TimeLess Car Rental REPRESENTATIVE had shown that each compartment in the parts of the vehicle was empty/did not contain any prohibited goods in violation of Malaysian laws. The BORROWER and GUARANTOR release TimeLess Car Rental and its representatives from any legal claims if any prohibited items are found by the authorities, in the vehicle for the entire period of use of the vehicle by the BORROWER and GUARANTOR.
+16. The agreed security deposit is as per agreed in the quotation. The security deposit is taken for wagering purposes for any breach of conditions and/or driving outside the stated destination and/or payment of part of the summons issue by the BORROWER during the loan tenure. The security deposit will be refunded (either in full or the balance after deduction if an issue arises) to the BORROWER on/after FIVE(5) WORKING DAYS after the vehicle has been returned to TimeLess Car Rental.
+EOT;
 
 $pdf = new TCPDF();
 $pdf->AddPage();

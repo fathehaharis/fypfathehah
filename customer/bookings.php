@@ -315,7 +315,7 @@ document.addEventListener('DOMContentLoaded', function() {
                             <th>Plate No</th>
                             <th>Pickup Date</th>
                             <th>Return Date</th>
-                            <th>Duration (days)</th>
+                            <th>Duration</th>
                             <th>Total (RM)</th>
                             <th>Status</th>
                             <th>Actions</th>
@@ -333,7 +333,18 @@ document.addEventListener('DOMContentLoaded', function() {
                                 <td><?= htmlspecialchars($b['plate_no']) ?></td>
                                 <td><?= date('d M Y, H:i', strtotime($b['pickup_datetime'])) ?></td>
                                 <td><?= date('d M Y, H:i', strtotime($b['return_datetime'])) ?></td>
-                                <td><?= htmlspecialchars($b['booking_duration']) ?></td>
+                                <td>
+                                    <?php
+                                        $duration_str = '';
+                                        if ((int)$b['day_count'] > 0) $duration_str .= (int)$b['day_count'] . ' day(s)';
+                                        if ((int)$b['hour_count'] > 0) {
+                                            if ($duration_str) $duration_str .= ' ';
+                                            $duration_str .= (int)$b['hour_count'] . ' hour(s)';
+                                        }
+                                        if (!$duration_str) $duration_str = htmlspecialchars($b['booking_duration'] ?? '-');
+                                        echo $duration_str;
+                                    ?>
+                                </td>
                                 <td><?= number_format($b['total_price'], 2) ?></td>
                                 <td>
                                     <?php
@@ -373,7 +384,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 <?php endif; ?>
             </div>
         <?php endforeach; ?>
-        <button class="back-btn" onclick="window.history.back()">Back</button>
+        <button class="back-btn" onclick="window.location.href='dashboard.php'">Back</button>
     </div>
 </div>
 

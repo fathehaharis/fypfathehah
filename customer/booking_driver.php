@@ -7,6 +7,24 @@ if (!isset($_SESSION['cust_id'])) {
 
 include '../connect.php';
 
+// 1. Store booking data from previous form (book_car.php)
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['pickup_date']) && isset($_POST['pickup_time'])) {
+    $pickup_date = $_POST['pickup_date'] ?? '';
+    $pickup_time = $_POST['pickup_time'] ?? '';
+    $return_date = $_POST['return_date'] ?? '';
+    $return_time = $_POST['return_time'] ?? '';
+    $pickup_datetime = $pickup_date . ' ' . $pickup_time . ':00';
+    $return_datetime = $return_date . ' ' . $return_time . ':00';
+
+    $_SESSION['booking_data'] = [
+        'car_id'         => $_POST['car_id'] ?? '',
+        'pickup_datetime'=> $pickup_datetime,
+        'return_datetime'=> $return_datetime,
+        'delivery_type'  => $_POST['delivery_type'] ?? '',
+        'notes'          => $_POST['notes'] ?? '',
+    ];
+}
+
 // Handle driver form submission (POST)
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['driver_full_name'])) {
     $errors = [];

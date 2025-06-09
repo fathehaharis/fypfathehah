@@ -18,7 +18,8 @@ $stmt = $conn->prepare("
         b.*,
         c.car_brand,
         c.car_model,
-        c.daily_rate,
+        c.daily_rate AS car_daily_rate,
+        c.hourly_rate AS car_hourly_rate,
         c.year,
         c.color,
         c.mileage,
@@ -50,16 +51,26 @@ $stmt->bind_result($car_image);
 $stmt->fetch();
 $stmt->close();
 
-// Fetch driver (customer) details
-$stmt = $conn->prepare("SELECT * FROM customer WHERE cust_id = ?");
-$stmt->bind_param("i", $booking['cust_id']);
-$stmt->execute();
-$driver = $stmt->get_result()->fetch_assoc();
-$stmt->close();
+// Fetch driver details from driver table (using booking's driver_id)
+$driver = null;
+if (!empty($booking['driver_id'])) {
+    $stmt = $conn->prepare("SELECT * FROM driver WHERE driver_id = ?");
+    $stmt->bind_param("i", $booking['driver_id']);
+    $stmt->execute();
+    $driver = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+}
 
-// Fetch guarantor (if any)
-$stmt = $conn->prepare("SELECT * FROM guarantor WHERE cust_id = ? ORDER BY guarantor_id DESC LIMIT 1");
-$stmt->bind_param("i", $booking['cust_id']);
+if (!$driver) {
+    echo "<p>Driver info not found for this booking.</p>";
+    include '../includes/footer.php';
+    exit;
+}
+
+// Fetch guarantor (if any) by driver_id
+$guarantor = null;
+$stmt = $conn->prepare("SELECT * FROM guarantor WHERE driver_id = ? ORDER BY guarantor_id DESC LIMIT 1");
+$stmt->bind_param("i", $booking['driver_id']);
 $stmt->execute();
 $guarantor = $stmt->get_result()->fetch_assoc();
 $stmt->close();
@@ -71,10 +82,12 @@ $stmt->execute();
 $services = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
 $stmt->close();
 
-// Car rental subtotal
+// Calculate rental breakdown
 $daily_rate = (float)($booking['daily_rate'] ?? 0);
-$duration = (int)($booking['booking_duration'] ?? 0);
-$car_total = $daily_rate * $duration;
+$hourly_rate = (float)($booking['hourly_rate'] ?? 0);
+$day_count = (int)($booking['day_count'] ?? 0);
+$hour_count = (int)($booking['hour_count'] ?? 0);
+$subtotal = ($daily_rate * $day_count) + ($hourly_rate * $hour_count);
 
 // Delivery info (from service table)
 $delivery_type_display = '-';
@@ -87,29 +100,30 @@ foreach ($services as $s) {
         $delivery_fee = (float)$s['fee'];
     }
 }
-$total_price = $car_total + $total_services_fee;
+$total_price = $subtotal + $total_services_fee;
+
 ?>
 <link rel="stylesheet" href="/assets/css/style.css">
 <style>
 body { background: #eceef4; }
-.view-section {
-    max-width: 600px;
+.review-section {
+    max-width: 680px;
     margin: 40px auto;
     background: #fff;
     border-radius: 13px;
     box-shadow: 0 4px 16px rgba(44,60,102,0.09);
     padding: 32px 40px 28px 40px;
 }
-.view-title {
+.review-title {
     font-size: 1.35em;
     font-weight: 700;
     color: #2f377d;
     margin-bottom: 24px;
 }
-.view-table { width:100%; border-collapse:collapse; margin-bottom: 30px; }
-.view-table th, .view-table td { padding: 8px 12px; }
-.view-table th { text-align: left; background: #f0f0f0; width: 180px; }
-.view-table td:last-child { text-align: right; }
+.review-table { width:100%; border-collapse:collapse; margin-bottom: 30px; }
+.review-table th, .review-table td { padding: 8px 12px; }
+.review-table th { text-align: left; background: #f0f0f0; width: 180px; }
+.review-table td:last-child { text-align: right; }
 .total { font-size:1.1em; font-weight: bold; color: #203090; }
 .section-label { margin: 18px 0 8px 0; font-weight: 600; color: #444; }
 .car-img-thumb {
@@ -130,7 +144,7 @@ body { background: #eceef4; }
     display: inline-block;
 }
 .status-pending { background: #fffbe7; color: #bfa800; }
-.status-upcoming { background: #f7faff; color: #2f377d; }
+.status-confirmed, .status-upcoming { background: #f7faff; color: #2f377d; }
 .status-completed { background: #e3fbe6; color: #219150; }
 .status-cancelled { background: #fde9e9; color: #d42d2d; }
 .back-btn {
@@ -152,11 +166,11 @@ body { background: #eceef4; }
 .back-btn:hover {background: #bbb;}
 </style>
 
-<div class="view-section">
-    <div class="view-title">Booking Details</div>
+<div class="review-section">
+    <div class="review-title">Booking Details</div>
 
     <div class="section-label">Car & Booking Details</div>
-    <table class="view-table">
+    <table class="review-table">
         <tr>
             <th>Car</th>
             <td>
@@ -168,13 +182,29 @@ body { background: #eceef4; }
                 <?= htmlspecialchars($booking['car_brand'].' '.$booking['car_model']) ?>
             </td>
         </tr>
-        <tr><th>Daily Rate</th><td>RM <?= number_format($booking['daily_rate'],2) ?></td></tr>
+        <tr>
+            <th>Rental Type</th>
+            <td>
+                <?php
+                if ($day_count > 0 && $hour_count > 0) echo "Daily + Hourly";
+                elseif ($day_count > 0) echo "Daily";
+                else echo "Hourly";
+                ?>
+            </td>
+        </tr>
+        <?php if ($day_count > 0): ?>
+        <tr><th>Daily Rate</th><td>RM <?= number_format($daily_rate,2) ?></td></tr>
+        <tr><th>Daily Count</th><td><?= $day_count ?> day(s)</td></tr>
+        <?php endif; ?>
+        <?php if ($hour_count > 0): ?>
+        <tr><th>Hourly Rate</th><td>RM <?= number_format($hourly_rate,2) ?></td></tr>
+        <tr><th>Hourly Count</th><td><?= $hour_count ?> hour(s)</td></tr>
+        <?php endif; ?>
         <tr><th>Pickup</th><td><?= htmlspecialchars($booking['pickup_datetime']) ?></td></tr>
         <tr><th>Return</th><td><?= htmlspecialchars($booking['return_datetime']) ?></td></tr>
-        <tr><th>Duration</th><td><?= htmlspecialchars($booking['booking_duration']) ?> day(s)</td></tr>
         <tr><th>Delivery Type</th><td><?= htmlspecialchars($delivery_type_display) ?></td></tr>
         <tr><th>Delivery Fee</th><td>RM <?= number_format($delivery_fee,2) ?></td></tr>
-        <tr><th>Subtotal</th><td>RM <?= number_format($car_total,2) ?></td></tr>
+        <tr><th>Subtotal</th><td>RM <?= number_format($subtotal,2) ?></td></tr>
         <tr>
             <th class="total">Total Amount</th>
             <td class="total">RM <?= number_format($total_price,2) ?></td>
@@ -186,6 +216,7 @@ body { background: #eceef4; }
                     $status = strtolower($booking['status']);
                     $status_class = 'status-upcoming';
                     if ($status == 'pending') $status_class = 'status-pending';
+                    else if ($status == 'confirmed') $status_class = 'status-confirmed';
                     else if ($status == 'completed') $status_class = 'status-completed';
                     else if ($status == 'cancelled') $status_class = 'status-cancelled';
                 ?>
@@ -196,11 +227,10 @@ body { background: #eceef4; }
         </tr>
     </table>
 
-    <div class="section-label">Driver (Customer)</div>
-    <table class="view-table">
+    <div class="section-label">Driver</div>
+    <table class="review-table">
         <tr><th>Name</th><td><?= htmlspecialchars($driver['full_name']) ?></td></tr>
         <tr><th>Phone</th><td><?= htmlspecialchars($driver['phone_no']) ?></td></tr>
-        <tr><th>Email</th><td><?= htmlspecialchars($driver['email']) ?></td></tr>
         <tr><th>ID No</th><td><?= htmlspecialchars($driver['id_no']) ?></td></tr>
         <tr><th>License No</th><td><?= htmlspecialchars($driver['license_no']) ?></td></tr>
         <tr><th>Address</th><td><?= htmlspecialchars($driver['address']) ?></td></tr>
@@ -208,15 +238,17 @@ body { background: #eceef4; }
     </table>
 
     <?php if ($guarantor): ?>
-        <div class="section-label">Guarantor</div>
-        <table class="view-table">
-            <tr><th>Name</th><td><?= htmlspecialchars($guarantor['full_name']) ?></td></tr>
-            <tr><th>Phone</th><td><?= htmlspecialchars($guarantor['phone_no']) ?></td></tr>
-            <tr><th>ID No</th><td><?= htmlspecialchars($guarantor['id_no']) ?></td></tr>
-            <tr><th>Relationship</th><td><?= htmlspecialchars($guarantor['relationship']) ?></td></tr>
-        </table>
+    <div class="section-label">Guarantor</div>
+    <table class="review-table">
+        <tr><th>Name</th><td><?= htmlspecialchars($guarantor['full_name']) ?></td></tr>
+        <tr><th>Phone</th><td><?= htmlspecialchars($guarantor['phone_no']) ?></td></tr>
+        <tr><th>ID No</th><td><?= htmlspecialchars($guarantor['id_no']) ?></td></tr>
+        <tr><th>Relationship</th><td><?= htmlspecialchars($guarantor['relationship']) ?></td></tr>
+    </table>
     <?php endif; ?>
 
-    <button class="back-btn" onclick="window.history.back()">Back</button>
+    <div class="btn-row">
+        <button class="back-btn" onclick="window.history.back()">Back</button>
+    </div>
 </div>
 <?php include '../includes/footer.php'; ?>
