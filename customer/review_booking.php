@@ -1,7 +1,7 @@
 <?php
 session_start();
 include '../connect.php';
-include '../includes/header.php';
+
 
 // 1. Ensure all session data is present
 $booking = $_SESSION['booking_data'] ?? [];
@@ -73,6 +73,7 @@ if (
 ) {
     $delivery_location = $booking['notes'];
 }
+include '../includes/header.php';
 ?>
 <link rel="stylesheet" href="/assets/css/style.css">
 <style>

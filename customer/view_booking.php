@@ -1,7 +1,6 @@
 <?php
 session_start();
 include '../connect.php';
-include '../includes/header.php';
 
 if (!isset($_GET['booking_id']) || !is_numeric($_GET['booking_id'])) {
     echo "<p>Invalid booking ID.</p>";
@@ -106,6 +105,21 @@ $security_deposit = isset($booking['security_deposit']) ? (float)$booking['secur
 
 $total_price = $subtotal + $total_services_fee + $security_deposit;
 
+// --------- Get agreement_id for this booking --------- //
+$stmt = $conn->prepare("SELECT agreement_id FROM agreement_form WHERE booking_id = ? LIMIT 1");
+$stmt->bind_param("i", $booking_id);
+$stmt->execute();
+$stmt->bind_result($agreement_id);
+$stmt->fetch();
+$stmt->close();
+
+$agreement_download_link = "";
+if ($agreement_id) {
+    // Note: download_agreement.php expects ?id=agreement_id
+    $agreement_download_link = "download_agreement.php?id=" . urlencode($agreement_id);
+}
+
+include '../includes/header.php';
 ?>
 <link rel="stylesheet" href="/assets/css/style.css">
 <style>
@@ -168,10 +182,35 @@ body { background: #eceef4; }
     margin-right: auto;
 }
 .back-btn:hover {background: #bbb;}
+.agreement-link {
+    display: inline-block;
+    margin: 12px 0 20px 0;
+    padding: 10px 24px;
+    background: #3c4cb8;
+    color: #fff;
+    border-radius: 7px;
+    font-weight: 600;
+    text-decoration: none;
+    font-size: 1.05em;
+    box-shadow: 0 2px 6px rgba(60,60,60,0.05);
+    transition: background 0.17s;
+}
+.agreement-link:hover {
+    background: #234c96;
+}
 </style>
 
 <div class="review-section">
     <div class="review-title">Booking Details</div>
+
+    <!-- Agreement Form Download Link -->
+    <?php if ($agreement_download_link): ?>
+    <div style="margin-bottom:20px;text-align:right;">
+        <a href="<?= htmlspecialchars($agreement_download_link) ?>" target="_blank" class="agreement-link">
+            Download Agreement Form
+        </a>
+    </div>
+    <?php endif; ?>
 
     <div class="section-label">Car & Booking Details</div>
     <table class="review-table">

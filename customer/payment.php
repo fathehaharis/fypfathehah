@@ -5,7 +5,6 @@ ini_set('display_startup_errors', 1);
 error_reporting(E_ALL);
 
 include '../connect.php';
-include '../includes/header.php';
 
 // Get booking_id from POST or GET
 $booking_id = null;
@@ -23,6 +22,7 @@ if (!isset($_SESSION['cust_id'])) {
     header("Location: /index.php");
     exit;
 }
+
 $cust_id = $_SESSION['cust_id'];
 
 // Fetch booking info and ensure it belongs to customer and not already paid/cancelled
@@ -56,10 +56,6 @@ $stmt->execute();
 $payment_row = $stmt->get_result()->fetch_assoc();
 $stmt->close();
 
-$show_gateway = false;
-$gateway_url = "";
-$chosen_method = "";
-
 // If form submitted (simulate payment processing)
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['pay_now'])) {
     // Calculate total payment amount
@@ -89,35 +85,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['pay_now'])) {
     $total_amount = $subtotal + $delivery_fee + $security_deposit;
 
     $payment_method = isset($_POST['payment_method']) ? $_POST['payment_method'] : 'Manual';
-    $payment_status = 'pending'; // pending for gateway, paid for manual/counter/card
+    $payment_status = 'paid'; // Mark as paid for all methods
     $payment_date = date('Y-m-d');
 
-    // Simulated gateway logic
-    if ($payment_method === "Online Banking") {
-        $show_gateway = true;
-        $chosen_method = "Online Banking";
-        $gateway_url = "https://www.maybank2u.com.my/"; // Example: Replace with real gateway
-    } elseif ($payment_method === "E-Wallet") {
-        $show_gateway = true;
-        $chosen_method = "E-Wallet";
-        $gateway_url = "https://www.touchngo.com.my/"; // Example: Replace with real gateway
-    } else {
-        // Manual/Counter or Credit Card (simulate instant payment confirmation)
-        $payment_status = "paid";
-        $stmt = $conn->prepare("INSERT INTO payment (booking_id, payment_date, amount, payment_method, payment_status) VALUES (?, ?, ?, ?, ?)");
-        $stmt->bind_param("isdss", $booking_id, $payment_date, $total_amount, $payment_method, $payment_status);
-        $stmt->execute();
-        $stmt->close();
+    // All methods are treated as instant payment confirmation
+    $stmt = $conn->prepare("INSERT INTO payment (booking_id, payment_date, amount, payment_method, payment_status) VALUES (?, ?, ?, ?, ?)");
+    $stmt->bind_param("isdss", $booking_id, $payment_date, $total_amount, $payment_method, $payment_status);
+    $stmt->execute();
+    $stmt->close();
 
-        // Update booking status to 'confirmed'
-        $stmt = $conn->prepare("UPDATE booking SET status='confirmed' WHERE booking_id=? AND cust_id=?");
-        $stmt->bind_param("ii", $booking_id, $cust_id);
-        $stmt->execute();
-        $stmt->close();
+    // Update booking status to 'confirmed'
+    $stmt = $conn->prepare("UPDATE booking SET status='confirmed' WHERE booking_id=? AND cust_id=?");
+    $stmt->bind_param("ii", $booking_id, $cust_id);
+    $stmt->execute();
+    $stmt->close();
 
-        header("Location: bookings.php?payment=success");
-        exit;
-    }
+    header("Location: bookings.php?payment=success");
+    exit;
 }
 
 // Calculate breakdown
@@ -144,6 +128,7 @@ foreach ($services as $s) {
 $security_deposit = isset($booking['security_deposit']) ? (float)$booking['security_deposit'] : 100.00;
 
 $total_amount = $subtotal + $delivery_fee + $security_deposit;
+include '../includes/header.php';
 ?>
 <link rel="stylesheet" href="/assets/css/style.css">
 <style>
@@ -285,23 +270,7 @@ $total_amount = $subtotal + $delivery_fee + $security_deposit;
             <td>RM <?= number_format($total_amount,2) ?></td>
         </tr>
     </table>
-    <?php if ($show_gateway && $gateway_url): ?>
-        <div class="gateway-box">
-            <p>
-                <strong>You selected: <?= htmlspecialchars($chosen_method) ?></strong>
-            </p>
-            <p>
-                <a class="gateway-link" href="<?= htmlspecialchars($gateway_url) ?>" target="_blank">
-                    Proceed to <?= htmlspecialchars($chosen_method) ?> Gateway
-                </a>
-            </p>
-            <p style="margin-top:16px;color:#888;">
-                After completing your payment, please contact our admin for confirmation.<br>
-                Your booking will be confirmed once payment is verified.
-            </p>
-            <a class="back-btn" href="bookings.php">Back to Bookings</a>
-        </div>
-    <?php elseif ($payment_row && $payment_row['payment_status'] == 'paid'): ?>
+    <?php if ($payment_row && $payment_row['payment_status'] == 'paid'): ?>
         <div class="payment-info">
             Payment received on <?= htmlspecialchars($payment_row['payment_date']) ?>.<br>
             Amount: RM <?= number_format($payment_row['amount'], 2) ?><br>
