@@ -98,7 +98,7 @@ $return_today = $conn->query("SELECT COUNT(*) FROM booking WHERE DATE(return_dat
     <a href="refunds.php">Manage Refunds</a>
     <a href="services.php">Booking Services</a>
     <a href="agreement_forms.php">Agreement Forms</a>
-    <a href="profile.php">My Profile</a>
+
   </nav>
   <main class="admin-main-content">
     <div class="dashboard-stats">
