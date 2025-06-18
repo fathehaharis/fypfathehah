@@ -1,4 +1,7 @@
 <?php
+ini_set('display_errors', 1);
+ini_set('display_startup_errors', 1);
+error_reporting(E_ALL);
 session_start();
 include '../connect.php';
 
@@ -128,7 +131,7 @@ if ($agreement_id) {
 }
 
 // Get all booking images (car condition, etc)
-$stmt = $conn->prepare("SELECT image_path, image_type, capture_type, uploaded_at, notes FROM booking_image WHERE booking_id = ?");
+$stmt = $conn->prepare("SELECT image_path, image_type, capture_type, uploaded_at, remarks FROM booking_image WHERE booking_id = ?");
 $stmt->bind_param("i", $booking_id);
 $stmt->execute();
 $img_result = $stmt->get_result();
@@ -136,14 +139,24 @@ $booking_imgs = $img_result->fetch_all(MYSQLI_ASSOC);
 $stmt->close();
 
 // ---- E-INSPECTION STATUS (from booking_image table, by capture_type) ---- //
-$inspection_pickup = false;
-$inspection_return = false;
+$has_return_img = false;
 foreach ($booking_imgs as $img) {
     if (isset($img['capture_type'])) {
-        if (strtolower($img['capture_type']) == 'pickup') $inspection_pickup = true;
-        if (strtolower($img['capture_type']) == 'return') $inspection_return = true;
+        if (strtolower($img['capture_type']) == 'return') $has_return_img = true;
     }
 }
+$inspection_return = (
+    !empty($booking['return_mileage']) &&
+    !empty($booking['return_fuel_percent']) &&
+    !empty($booking['return_datetime']) &&
+    $has_return_img
+);
+// Add pickup_filled variable
+$pickup_filled = (
+    !empty($booking['pickup_mileage']) &&
+    !empty($booking['pickup_fuel_percent']) &&
+    !empty($booking['pickup_datetime'])
+);
 
 include 'admin_header.php';
 ?>
@@ -224,26 +237,6 @@ body { background: #eceef4; }
 .agreement-link:hover {
     background: #234c96;
 }
-.booking-imgs {
-    display: flex;
-    gap: 18px;
-    flex-wrap: wrap;
-    margin-top: 10px;
-}
-.booking-imgs img {
-    width: 95px;
-    height: 68px;
-    object-fit: cover;
-    border-radius: 7px;
-    border: 1px solid #dfe4ee;
-    background: #f8fafd;
-}
-.booking-img-caption {
-    font-size: .98em;
-    color: #777;
-    margin-top: 2px;
-    text-align: center;
-}
 .einspection-label {
     color: #8a96ad;
     font-weight: 700;
@@ -284,7 +277,6 @@ body { background: #eceef4; }
     color: #0a9151;
     font-weight: 600;
     background: #f4f6fa;
-    pointer-events: none;
 }
 .einspection-btn:not(.done) {
     color: #222;
@@ -299,29 +291,22 @@ body { background: #eceef4; }
 <!-- E-INSPECTION SECTION -->
 <div class="einspection-label">E-INSPECTION</div>
 <div class="einspection-row">
-    <?php if ($inspection_pickup): ?>
-        <span class="einspection-btn done">
+    <a class="einspection-btn<?= $pickup_filled ? ' done' : '' ?>" href="inspection_add.php?booking_id=<?= $booking_id ?>&type=pickup">
+        <?php if ($pickup_filled): ?>
             <svg viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="10" fill="#17C964"/><path d="M14.3 8.3a1 1 0 1 0-1.6-1.2l-3 4-1.4-1.3A1 1 0 1 0 6.3 11.2l2.1 1.8a1 1 0 0 0 1.4-.2l3.5-4.5Z" fill="#fff"/></svg>
-            Pickup
-        </span>
-    <?php else: ?>
-        <a class="einspection-btn" href="inspection_add.php?booking_id=<?= $booking_id ?>&type=pickup">
+        <?php else: ?>
             <svg width="16" height="16" fill="none"><rect width="16" height="16" rx="8" fill="#b5bee5"/><path d="M8 4v8M4 8h8" stroke="#222" stroke-width="1.5" stroke-linecap="round"/></svg>
-            Pickup
-        </a>
-    <?php endif; ?>
-
-    <?php if ($inspection_return): ?>
-        <span class="einspection-btn done">
+        <?php endif; ?>
+        Pickup
+    </a>
+    <a class="einspection-btn<?= $inspection_return ? ' done' : '' ?>" href="inspection_add.php?booking_id=<?= $booking_id ?>&type=return">
+        <?php if ($inspection_return): ?>
             <svg viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="10" fill="#17C964"/><path d="M14.3 8.3a1 1 0 1 0-1.6-1.2l-3 4-1.4-1.3A1 1 0 1 0 6.3 11.2l2.1 1.8a1 1 0 0 0 1.4-.2l3.5-4.5Z" fill="#fff"/></svg>
-            Return
-        </span>
-    <?php else: ?>
-        <a class="einspection-btn" href="inspection_add.php?booking_id=<?= $booking_id ?>&type=return">
+        <?php else: ?>
             <svg width="16" height="16" fill="none"><rect width="16" height="16" rx="8" fill="#b5bee5"/><path d="M8 4v8M4 8h8" stroke="#222" stroke-width="1.5" stroke-linecap="round"/></svg>
-            Return
-        </a>
-    <?php endif; ?>
+        <?php endif; ?>
+        Return
+    </a>
 </div>
 <!-- End E-INSPECTION SECTION -->
 
@@ -432,22 +417,7 @@ body { background: #eceef4; }
     </table>
     <?php endif; ?>
 
-    <?php if (count($booking_imgs)): ?>
-    <div class="section-label">Booking Images (Car Condition / Documents)</div>
-    <div class="booking-imgs">
-        <?php foreach ($booking_imgs as $img): ?>
-            <div>
-                <img src="data:image/jpeg;base64,<?= base64_encode($img['image_path']) ?>" alt="Booking Image">
-                <div class="booking-img-caption">
-                    <?= htmlspecialchars($img['image_type']) ?>
-                    <?php if($img['capture_type']) echo '<br>'.htmlspecialchars($img['capture_type']); ?>
-                    <?php if($img['notes']) echo '<br>'.htmlspecialchars($img['notes']); ?>
-                    <br><small><?= htmlspecialchars($img['uploaded_at']) ?></small>
-                </div>
-            </div>
-        <?php endforeach; ?>
-    </div>
-    <?php endif; ?>
+    <!-- Booking Images section removed per Option A. Images are now visible only in inspection details. -->
 
     <div class="btn-row">
         <button class="back-btn" onclick="window.history.back()">Back</button>
