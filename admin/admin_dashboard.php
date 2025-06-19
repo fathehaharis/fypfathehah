@@ -135,7 +135,7 @@ $return_today = $conn->query("SELECT COUNT(*) FROM booking WHERE DATE(return_dat
     <a href="cars.php">Cars</a>
     <a href="bookings.php">Bookings</a>
     <a href="drivers.php">Drivers</a>
-    <a href="payments.php">Payments</a>
+    <a href="payments.php">Payments And Refunds</a>
   </nav>
   <main class="admin-main-content">
     <div class="dashboard-header">

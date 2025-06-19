@@ -5,6 +5,7 @@ if (session_status() === PHP_SESSION_NONE) {
 ?>
 <link rel="icon" type="image/png" href="/assets/images/TimeLess_logo.png">
 <link rel="stylesheet" href="/assets/css/style.css">
+<title>Admin TimeLess Car Rental </title>
 <link href="https://fonts.googleapis.com/css?family=Montserrat:700,400&display=swap" rel="stylesheet">
 <style>
   .header-bar {

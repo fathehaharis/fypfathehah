@@ -8,6 +8,15 @@ if (!isset($_SESSION['cust_id'])) {
 include '../connect.php';
 include '../includes/header.php';
 
+// Fetch customer name
+$cust_id = $_SESSION['cust_id'];
+$stmt = $conn->prepare("SELECT username FROM customer WHERE cust_id = ?");
+$stmt->bind_param("i", $cust_id);
+$stmt->execute();
+$stmt->bind_result($customer_name);
+$stmt->fetch();
+$stmt->close();
+
 // Fetch all available cars
 $sql = "
         SELECT c.car_id, c.car_brand, c.car_model, c.plate_no, c.daily_rate,
@@ -32,6 +41,15 @@ $result = $conn->query($sql);
 
 <link rel="stylesheet" href="/assets/css/style.css">
 <style>
+.welcome-msg {
+    max-width: 1200px;
+    margin: 35px auto -10px auto;
+    padding: 0 16px;
+    font-size: 1.23em;
+    font-weight: 500;
+    color: #2f377d;
+    letter-spacing: 0.02em;
+}
 .cars-container {
     max-width: 1200px;
     margin: 40px auto 0 auto;
@@ -106,6 +124,10 @@ $result = $conn->query($sql);
     font-size: 1.18em;
 }
 </style>
+
+<div class="welcome-msg">
+    Hi, welcome <?= htmlspecialchars($customer_name) ?>!
+</div>
 
 <div class="cars-container">
 <?php if ($result && $result->num_rows > 0): ?>

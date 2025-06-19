@@ -1,6 +1,11 @@
 <?php
+session_start();
+if (isset($_SESSION['cust_id'])) {
+    header("Location: /customer/dashboard.php"); // Adjust the path if needed
+    exit;
+}
 include 'connect.php';
-session_start(); // Make sure session is started to access session variables
+
 ?>
 <link rel="icon" type="image/png" href="/assets/images/TimeLess_logo.png">
 <link rel="stylesheet" href="/assets/css/style.css">
@@ -38,7 +43,7 @@ session_start(); // Make sure session is started to access session variables
       <input type="password" name="password" placeholder="Password" required>
       <label class="remember-me"><input type="checkbox" name="remember"> Remember me</label>
       <button type="submit" class="login-btn">Log In</button>
-      <div class="forgot-link"><a href="#">Forgot your password?</a></div>
+      <div class="forgot-link"><a href="customer/forgot_password.php">Forgot your password?</a></div>
     </form>
   </div>
 </div>

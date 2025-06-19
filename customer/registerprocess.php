@@ -2,6 +2,24 @@
 include '../connect.php';
 session_start();
 
+function suggest_username($base, $conn) {
+    $suggested = $base;
+    $i = 1;
+    while (true) {
+        $stmt = $conn->prepare("SELECT cust_id FROM customer WHERE username = ?");
+        $stmt->bind_param("s", $suggested);
+        $stmt->execute();
+        $stmt->store_result();
+        if ($stmt->num_rows == 0) {
+            $stmt->close();
+            return $suggested;
+        }
+        $stmt->close();
+        $suggested = $base . $i;
+        $i++;
+    }
+}
+
 if ($_SERVER["REQUEST_METHOD"] === "POST") {
     $username = trim($_POST['username'] ?? '');
     $phone_no = trim($_POST['phone_no'] ?? '');
@@ -11,6 +29,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
     $age = trim($_POST['age'] ?? '');
 
     $errors = [];
+    $suggested_username = "";
 
     // Validation
     if (!$username || !$phone_no || !$email || !$password || !$confirm_password) {
@@ -26,16 +45,53 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
         $errors[] = "You must be at least 18 years old.";
     }
 
+    // Password policy enforcement
+    if (strlen($password) < 8) {
+        $errors[] = "Password must be at least 8 characters long.";
+    }
+    if (!preg_match('/[A-Z]/', $password)) {
+        $errors[] = "Password must contain at least one uppercase letter.";
+    }
+    if (!preg_match('/[a-z]/', $password)) {
+        $errors[] = "Password must contain at least one lowercase letter.";
+    }
+    if (!preg_match('/[0-9]/', $password)) {
+        $errors[] = "Password must contain at least one number.";
+    }
+    if (!preg_match('/[\W_]/', $password)) {
+        $errors[] = "Password must contain at least one special character.";
+    }
+
     // Check for unique username/email
     if (empty($errors)) {
-        $stmt = $conn->prepare("SELECT cust_id FROM customer WHERE username = ? OR email = ?");
+        $username_exists = false;
+        $email_exists = false;
+
+        $stmt = $conn->prepare("SELECT username, email FROM customer WHERE username = ? OR email = ?");
         $stmt->bind_param("ss", $username, $email);
         $stmt->execute();
         $stmt->store_result();
+
         if ($stmt->num_rows > 0) {
-            $errors[] = "Username or email already exists.";
+            $stmt->bind_result($existing_username, $existing_email);
+            while ($stmt->fetch()) {
+                if ($existing_username === $username) {
+                    $username_exists = true;
+                }
+                if ($existing_email === $email) {
+                    $email_exists = true;
+                }
+            }
         }
         $stmt->close();
+
+        if ($username_exists) {
+            $suggested_username = suggest_username($username, $conn);
+            $errors[] = "Username already exists. You can use: <strong>" . htmlspecialchars($suggested_username) . "</strong>";
+        }
+        if ($email_exists) {
+            $errors[] = "An account with this email already exists.";
+        }
     }
 
     // Insert new customer if no errors
@@ -54,6 +110,9 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
     }
 
     $_SESSION['registration_errors'] = $errors;
+    if (!empty($suggested_username)) {
+        $_SESSION['suggested_username'] = $suggested_username;
+    }
     header("Location: register.php");
     exit;
 } else {

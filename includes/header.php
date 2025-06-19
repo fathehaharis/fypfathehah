@@ -157,8 +157,6 @@
       <span class="site-title">TimeLess Car Rental</span>
     </div>
     <div class="header-icons">
-      <button class="header-icon-btn" title="Notifications">
-        <span>🔔</span>
       </button>
       <div class="profile-dropdown">
         <button class="profile-btn" title="Profile">

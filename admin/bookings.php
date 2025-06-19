@@ -2,6 +2,7 @@
 include '../connect.php';
 session_start();
 
+date_default_timezone_set('Asia/Kuala_Lumpur');
 if (!isset($_SESSION['admin_id'])) {
     header("Location: admin_login.php");
     exit;

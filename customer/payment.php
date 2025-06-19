@@ -5,6 +5,9 @@ ini_set('display_startup_errors', 1);
 error_reporting(E_ALL);
 
 include '../connect.php';
+require '../vendor/autoload.php'; // PHPMailer
+use PHPMailer\PHPMailer\PHPMailer;
+use PHPMailer\PHPMailer\Exception;
 
 // Get booking_id from POST or GET
 $booking_id = null;
@@ -99,6 +102,72 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['pay_now'])) {
     $stmt->bind_param("ii", $booking_id, $cust_id);
     $stmt->execute();
     $stmt->close();
+
+    // ----------- Send Payment Confirmation Email -----------
+    // Fetch customer and car info for the email
+    $stmt = $conn->prepare("SELECT c.username, c.email, b.pickup_datetime, b.return_datetime, b.booking_id, b.total_price, car.car_model
+        FROM booking b
+        JOIN customer c ON b.cust_id = c.cust_id
+        JOIN car ON b.car_id = car.car_id
+        WHERE b.booking_id = ? AND b.cust_id = ?");
+    $stmt->bind_param("ii", $booking_id, $cust_id);
+    $stmt->execute();
+    $data = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    if ($data) {
+        $customer_name = $data['username'];
+        $customer_email = $data['email'];
+        $pickup_datetime = $data['pickup_datetime'];
+        $return_datetime = $data['return_datetime'];
+        $car_model = $data['car_model'];
+        $booking_id = $data['booking_id'];
+        $total_price = $data['total_price'];
+
+        $mail = new PHPMailer(true);
+        try {
+            $mail->isSMTP();
+            $mail->Host       = 'smtp.gmail.com';
+            $mail->SMTPAuth   = true;
+            $mail->Username   = 'fathehaharis69@gmail.com'; // Your SMTP username
+            $mail->Password   = 'cuel ijeu lzqv vsgv';   // Your SMTP app password
+            $mail->SMTPSecure = 'tls';
+            $mail->Port       = 587;
+
+            $mail->setFrom('no-reply@timelesscarrental.com', 'TimeLess Car Rental');
+            $mail->addAddress($customer_email, $customer_name);
+
+            $mail->isHTML(true);
+            $mail->Subject = "Payment Received - TimeLess Car Rental";
+            $mail->Body    = "
+                <h2>Payment Received</h2>
+                <p>Dear <strong>$customer_name</strong>,</p>
+                <p>Your payment for the booking <strong>#$booking_id</strong> has been received and confirmed!</p>
+                <table style='border-collapse:collapse;'>
+                    <tr><td style='padding:4px 8px;font-weight:bold;'>Car Model</td><td style='padding:4px 8px;'>$car_model</td></tr>
+                    <tr><td style='padding:4px 8px;font-weight:bold;'>Pickup Date &amp; Time</td><td style='padding:4px 8px;'>$pickup_datetime</td></tr>
+                    <tr><td style='padding:4px 8px;font-weight:bold;'>Return Date &amp; Time</td><td style='padding:4px 8px;'>$return_datetime</td></tr>
+                    <tr><td style='padding:4px 8px;font-weight:bold;'>Amount Paid</td><td style='padding:4px 8px;'>RM ".number_format($total_price,2)."</td></tr>
+                </table>
+                <p>Thank you for choosing TimeLess Car Rental. We look forward to serving you!</p>
+                <br>
+                <p>Best regards,<br>TimeLess Car Rental Team</p>
+            ";
+            $mail->AltBody = "Dear $customer_name,\n\nYour payment for booking #$booking_id has been received and confirmed!\n\n"
+                . "Car Model: $car_model\n"
+                . "Pickup Date & Time: $pickup_datetime\n"
+                . "Return Date & Time: $return_datetime\n"
+                . "Amount Paid: RM ".number_format($total_price,2)."\n\n"
+                . "Thank you for choosing TimeLess Car Rental.\n\n"
+                . "Best regards,\nTimeLess Car Rental Team";
+
+            $mail->send();
+        } catch (Exception $e) {
+            // Optionally log the error: $mail->ErrorInfo
+            // echo "Mailer Error: " . $mail->ErrorInfo;
+        }
+    }
+    // ------------------------------------------------------
 
     header("Location: bookings.php?payment=success");
     exit;

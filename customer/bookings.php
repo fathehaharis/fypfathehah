@@ -6,7 +6,7 @@ if (!isset($_SESSION['cust_id'])) {
 }
 
 include '../connect.php';
-
+date_default_timezone_set('Asia/Kuala_Lumpur');
 
 $cust_id = $_SESSION['cust_id'];
 
