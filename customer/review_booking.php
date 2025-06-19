@@ -2,7 +2,6 @@
 session_start();
 include '../connect.php';
 
-
 // 1. Ensure all session data is present
 $booking = $_SESSION['booking_data'] ?? [];
 $driver = $_SESSION['driver_data'] ?? [];
@@ -65,7 +64,7 @@ $_SESSION['booking_data']['security_deposit'] = $security_deposit;
 $total_price = $subtotal + $delivery_fee + $security_deposit;
 $_SESSION['booking_data']['total_price'] = $total_price;
 
-// 6. Delivery location/notes (from booking_data['notes'])
+// 8. Delivery location/notes (from booking_data['notes'])
 $delivery_location = '';
 if (
     ($delivery_type === 'delivery' || $delivery_type === 'pickup_and_return') 
@@ -98,6 +97,8 @@ body { background: #eceef4; }
 .review-table td:last-child { text-align: right; }
 .total { font-size:1.1em; font-weight: bold; color: #203090; }
 .section-label { margin: 18px 0 8px 0; font-weight: 600; color: #444; }
+.img-preview { max-width:120px; max-height:80px; border:1px solid #ccc; border-radius:6px; margin:2px 0; }
+.img-preview-big { max-width:160px; max-height:110px; border:1px solid #bbb; border-radius:7px; margin:2px 0; }
 .btn-row {
     margin-top: 28px;
     text-align: right;
@@ -127,6 +128,10 @@ body { background: #eceef4; }
     transition: background 0.18s;
 }
 .back-btn:hover {background: #bbb;}
+@media (max-width: 800px) {
+    .review-section { padding:20px 6vw; }
+    .review-table th { width: 34vw; font-size:0.95em;}
+}
 </style>
 
 <div class="review-section">
@@ -177,6 +182,26 @@ body { background: #eceef4; }
         <tr><th>License No</th><td><?= htmlspecialchars($driver['license_no']) ?></td></tr>
         <tr><th>Address</th><td><?= htmlspecialchars($driver['address']) ?></td></tr>
         <tr><th>Age</th><td><?= htmlspecialchars($driver['age']) ?></td></tr>
+        <tr>
+            <th>License Front Image</th>
+            <td>
+                <?php if (!empty($driver['id_front'])): ?>
+                    <img src="show_temp_image.php?type=driver_id_front" alt="ID Front" class="img-preview-big">
+                <?php else: ?>
+                    -
+                <?php endif; ?>
+            </td>
+        </tr>
+        <tr>
+            <th>License Back Image</th>
+            <td>
+                <?php if (!empty($driver['id_back'])): ?>
+                    <img src="show_temp_image.php?type=driver_id_back" alt="ID Back" class="img-preview-big">
+                <?php else: ?>
+                    -
+                <?php endif; ?>
+            </td>
+        </tr>
     </table>
     <div class="section-label">Guarantor</div>
     <table class="review-table">
@@ -184,6 +209,26 @@ body { background: #eceef4; }
         <tr><th>Phone</th><td><?= htmlspecialchars($guarantor['guarantor_phone_no']) ?></td></tr>
         <tr><th>ID No</th><td><?= htmlspecialchars($guarantor['guarantor_id_no']) ?></td></tr>
         <tr><th>Relationship</th><td><?= htmlspecialchars($guarantor['guarantor_relationship']) ?></td></tr>
+        <tr>
+            <th>ID Front Image</th>
+            <td>
+                <?php if (!empty($guarantor['guarantor_id_front'])): ?>
+                    <img src="show_temp_image.php?type=guarantor_id_front" alt="Guarantor ID Front" class="img-preview">
+                <?php else: ?>
+                    -
+                <?php endif; ?>
+            </td>
+        </tr>
+        <tr>
+            <th>ID Back Image</th>
+            <td>
+                <?php if (!empty($guarantor['guarantor_id_back'])): ?>
+                    <img src="show_temp_image.php?type=guarantor_id_back" alt="Guarantor ID Back" class="img-preview">
+                <?php else: ?>
+                    -
+                <?php endif; ?>
+            </td>
+        </tr>
     </table>
     <div class="btn-row">
         <form action="booking_guarantor.php" method="get" style="display:inline;">

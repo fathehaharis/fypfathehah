@@ -91,6 +91,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['pay_now'])) {
     $payment_status = 'paid'; // Mark as paid for all methods
     $payment_date = date('Y-m-d');
 
+    // Extra fields
+    $bank_choice = isset($_POST['online_bank']) ? $_POST['online_bank'] : '';
+    $card_number = isset($_POST['card_number']) ? $_POST['card_number'] : '';
+    $card_expiry = isset($_POST['card_expiry']) ? $_POST['card_expiry'] : '';
+    $card_cvc = isset($_POST['card_cvc']) ? $_POST['card_cvc'] : '';
+
+    // For display in payment_method column
+    if ($payment_method === 'Online Banking' && $bank_choice) {
+        $payment_method .= ' - ' . $bank_choice;
+    }
+    if ($payment_method === 'Credit/Debit Card' && $card_number) {
+        $payment_method .= ' - ' . substr($card_number, -4);
+    }
+
     // All methods are treated as instant payment confirmation
     $stmt = $conn->prepare("INSERT INTO payment (booking_id, payment_date, amount, payment_method, payment_status) VALUES (?, ?, ?, ?, ?)");
     $stmt->bind_param("isdss", $booking_id, $payment_date, $total_amount, $payment_method, $payment_status);
@@ -104,7 +118,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['pay_now'])) {
     $stmt->close();
 
     // ----------- Send Payment Confirmation Email -----------
-    // Fetch customer and car info for the email
     $stmt = $conn->prepare("SELECT c.username, c.email, b.pickup_datetime, b.return_datetime, b.booking_id, b.total_price, car.car_model
         FROM booking b
         JOIN customer c ON b.cust_id = c.cust_id
@@ -164,7 +177,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['pay_now'])) {
             $mail->send();
         } catch (Exception $e) {
             // Optionally log the error: $mail->ErrorInfo
-            // echo "Mailer Error: " . $mail->ErrorInfo;
         }
     }
     // ------------------------------------------------------
@@ -201,6 +213,7 @@ include '../includes/header.php';
 ?>
 <link rel="stylesheet" href="/assets/css/style.css">
 <style>
+/* ... your existing CSS ... */
 .payment-section {
     max-width: 480px;
     margin: 60px auto;
@@ -266,13 +279,17 @@ include '../includes/header.php';
     color: #219150;
     font-weight: 600;
 }
-.payment-method-select {
+.payment-method-select, .bank-select, .credit-input {
     margin: 10px 0 20px 0;
     width: 100%;
     padding: 11px 8px;
     border-radius: 6px;
     border: 1px solid #d3d3e7;
     font-size: 1.08em;
+    display: block;
+}
+.credit-input {
+    margin: 7px 0 0 0;
 }
 .gateway-box {
     padding: 30px 0;
@@ -347,18 +364,76 @@ include '../includes/header.php';
         </div>
         <a class="back-btn" href="bookings.php">Back to Bookings</a>
     <?php else: ?>
-        <form action="payment.php" method="post">
+        <form action="payment.php" method="post" id="paymentForm" autocomplete="off">
             <input type="hidden" name="booking_id" value="<?= htmlspecialchars($booking_id) ?>">
             <label for="payment_method"><strong>Choose Payment Method:</strong></label>
             <select name="payment_method" id="payment_method" class="payment-method-select" required>
                 <option value="Manual">Manual / Counter</option>
                 <option value="Online Banking">Online Banking</option>
                 <option value="Credit/Debit Card">Credit/Debit Card</option>
-                <option value="E-Wallet">E-Wallet</option>
             </select>
+
+            <!-- Online Banking Banks (hidden by default) -->
+            <select name="online_bank" id="online_bank" class="bank-select" style="display:none;" required>
+                <option value="">-- Select Bank --</option>
+                <option value="Maybank">Maybank</option>
+                <option value="CIMB">CIMB</option>
+                <option value="Public Bank">Public Bank</option>
+                <option value="RHB Bank">RHB Bank</option>
+                <option value="Hong Leong Bank">Hong Leong Bank</option>
+                <option value="Bank Islam">Bank Islam</option>
+                <option value="Bank Rakyat">Bank Rakyat</option>
+                <option value="UOB">UOB</option>
+                <option value="OCBC">OCBC</option>
+                <option value="HSBC">HSBC</option>
+            </select>
+
+            <!-- Credit Card Inputs (hidden by default) -->
+            <div id="credit_details" style="display:none;">
+                <input type="text" maxlength="19" name="card_number" id="card_number" class="credit-input" placeholder="Card Number (16 digits)" pattern="(?:[0-9]{4} ?){4,5}">
+                <input type="text" maxlength="5" name="card_expiry" id="card_expiry" class="credit-input" placeholder="MM/YY" pattern="\d{2}/\d{2}">
+                <input type="text" maxlength="4" name="card_cvc" id="card_cvc" class="credit-input" placeholder="CVC" pattern="\d{3,4}">
+            </div>
+
             <button class="pay-btn" type="submit" name="pay_now">Pay Now</button>
         </form>
         <button class="back-btn" onclick="window.history.back()">Back</button>
+        <script>
+        const paymentMethod = document.getElementById('payment_method');
+        const bankSelect = document.getElementById('online_bank');
+        const creditDiv = document.getElementById('credit_details');
+        const cardInputs = creditDiv.querySelectorAll('input');
+
+        function updatePaymentForm() {
+            if (paymentMethod.value === 'Online Banking') {
+                bankSelect.style.display = '';
+                bankSelect.required = true;
+                creditDiv.style.display = 'none';
+                cardInputs.forEach(i => { i.required = false; i.value = ''; });
+            } else if (paymentMethod.value === 'Credit/Debit Card') {
+                bankSelect.style.display = 'none';
+                bankSelect.required = false;
+                bankSelect.value = '';
+                creditDiv.style.display = '';
+                cardInputs.forEach(i => i.required = true);
+            } else {
+                bankSelect.style.display = 'none';
+                bankSelect.required = false;
+                bankSelect.value = '';
+                creditDiv.style.display = 'none';
+                cardInputs.forEach(i => { i.required = false; i.value = ''; });
+            }
+        }
+        paymentMethod.addEventListener('change', updatePaymentForm);
+        window.addEventListener('DOMContentLoaded', updatePaymentForm);
+
+        // Optional: Format card number input
+        document.getElementById('card_number').addEventListener('input', function(e) {
+            let value = e.target.value.replace(/\D/g, '').slice(0,19);
+            value = value.replace(/(.{4})/g, '$1 ').trim();
+            e.target.value = value;
+        });
+        </script>
     <?php endif; ?>
 </div>
 <?php include '../includes/footer.php'; ?>

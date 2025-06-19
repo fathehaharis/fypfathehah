@@ -10,12 +10,15 @@ date_default_timezone_set('Asia/Kuala_Lumpur');
 
 $cust_id = $_SESSION['cust_id'];
 
-// Status mapping for display sections
+// Status mapping for display sections (add any new statuses here)
 $status_map = [
-    'pending'   => 'Pending',
-    'confirmed' => 'Upcoming',
-    'completed' => 'Completed',
-    'cancelled' => 'Cancelled'
+    'pending'              => 'Pending',
+    'waiting_verification' => 'Pending',
+    'approved'             => 'Pending',   // Only show "Pay" if approved
+    'confirmed'            => 'Upcoming',
+    'completed'            => 'Completed',
+    'cancelled'            => 'Cancelled',
+    'rejected'             => 'Cancelled'
 ];
 
 // Prepare empty arrays for each section
@@ -322,6 +325,14 @@ document.addEventListener('DOMContentLoaded', function() {
                             <th>Actions</th>
                         </tr>
                         <?php foreach ($bookings[$section] as $b): ?>
+                            <?php
+                                // Calculate if pickup is at least 24 hours from now
+                                $now = new DateTime('now', new DateTimeZone('Asia/Kuala_Lumpur'));
+                                $pickup_dt = new DateTime($b['pickup_datetime'], new DateTimeZone('Asia/Kuala_Lumpur'));
+                                $interval = $now->diff($pickup_dt);
+                                $hours_to_pickup = ($pickup_dt > $now) ? ($interval->days * 24 + $interval->h + $interval->i/60) : 0;
+                                $can_cancel = $hours_to_pickup > 24;
+                            ?>
                             <tr>
                                 <td>
                                     <?php if (!empty($b['car_image'])): ?>
@@ -361,17 +372,29 @@ document.addEventListener('DOMContentLoaded', function() {
                                 <td class="booking-actions">
                                     <?php if ($section == 'Pending'): ?>
                                         <a class="action-btn view" href="view_booking.php?booking_id=<?= $b['booking_id'] ?>">View</a>
-                                        <a class="action-btn" style="background:#f8a100;" href="payment.php?booking_id=<?= $b['booking_id'] ?>">Pay</a>
-                                        <form action="cancel_booking.php" method="post" style="display:inline;">
-                                            <input type="hidden" name="booking_id" value="<?= $b['booking_id'] ?>">
-                                            <button type="submit" class="action-btn cancel" onclick="return confirm('Are you sure you want to cancel this booking?');">Cancel</button>
-                                        </form>
+                                        <?php if (strtolower($b['status']) === 'approved'): ?>
+                                            <a class="action-btn" style="background:#f8a100;" href="payment.php?booking_id=<?= $b['booking_id'] ?>">Pay</a>
+                                        <?php else: ?>
+                                            <span style="color:#999;font-size:0.98em;">Awaiting admin approval</span>
+                                        <?php endif; ?>
+                                        <?php if ($can_cancel): ?>
+                                            <form action="cancel_booking.php" method="post" style="display:inline;">
+                                                <input type="hidden" name="booking_id" value="<?= $b['booking_id'] ?>">
+                                                <button type="submit" class="action-btn cancel" onclick="return confirm('Are you sure you want to cancel this booking?');">Cancel</button>
+                                            </form>
+                                        <?php else: ?>
+                                            <span style="color:#999;font-size:0.98em;">Cannot cancel less than 1 day before pickup</span>
+                                        <?php endif; ?>
                                     <?php elseif ($section == 'Upcoming'): ?>
                                         <a class="action-btn view" href="view_booking.php?booking_id=<?= $b['booking_id'] ?>">View</a>
-                                        <form action="cancel_booking.php" method="post" style="display:inline;">
-                                            <input type="hidden" name="booking_id" value="<?= $b['booking_id'] ?>">
-                                            <button type="submit" class="action-btn cancel" onclick="return confirm('Are you sure you want to cancel? You will NOT get your deposit back. Any eligible refund will be credited to your account within 3 - 5 days after cancellation.');">Cancel</button>
-                                        </form>
+                                        <?php if ($can_cancel): ?>
+                                            <form action="cancel_booking.php" method="post" style="display:inline;">
+                                                <input type="hidden" name="booking_id" value="<?= $b['booking_id'] ?>">
+                                                <button type="submit" class="action-btn cancel" onclick="return confirm('Are you sure you want to cancel? You will NOT get your deposit back. Any eligible refund will be credited to your account within 3 - 5 days after cancellation.');">Cancel</button>
+                                            </form>
+                                        <?php else: ?>
+                                            <span style="color:#999;font-size:0.98em;">Cannot cancel less than 1 day before pickup</span>
+                                        <?php endif; ?>
                                     <?php elseif ($section == 'Completed'): ?>
                                         <a class="action-btn view" href="view_booking.php?booking_id=<?= $b['booking_id'] ?>">View</a>
                                         <a class="action-btn view" href="download_agreement.php?booking_id=<?= $b['booking_id'] ?>">Agreement</a>

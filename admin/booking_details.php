@@ -5,6 +5,9 @@ error_reporting(E_ALL);
 session_start();
 include '../connect.php';
 
+// Set Malaysia timezone
+date_default_timezone_set('Asia/Kuala_Lumpur');
+
 if (!isset($_SESSION['admin_id'])) {
     header("Location: admin_login.php");
     exit;
@@ -17,6 +20,29 @@ if (!isset($_GET['id']) || !is_numeric($_GET['id'])) {
 }
 
 $booking_id = intval($_GET['id']);
+
+// Handle Approve/Reject actions
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['booking_action'])) {
+    $action = $_POST['booking_action'];
+    if ($action === 'approve') {
+        $stmt = $conn->prepare("UPDATE booking SET status = 'approved' WHERE booking_id = ?");
+        $stmt->bind_param("i", $booking_id);
+        $stmt->execute();
+        $stmt->close();
+        $_SESSION['flash_message'] = "Booking approved.";
+        header("Location: booking_details.php?id=" . urlencode($booking_id));
+        exit;
+    } elseif ($action === 'reject' && !empty($_POST['rejection_reason'])) {
+        $rejection_reason = trim($_POST['rejection_reason']);
+        $stmt = $conn->prepare("UPDATE booking SET status = 'rejected', rejection_reason = ? WHERE booking_id = ?");
+        $stmt->bind_param("si", $rejection_reason, $booking_id);
+        $stmt->execute();
+        $stmt->close();
+        $_SESSION['flash_message'] = "Booking rejected.";
+        header("Location: booking_details.php?id=" . urlencode($booking_id));
+        exit;
+    }
+}
 
 // Fetch booking + car + customer info
 $stmt = $conn->prepare("
@@ -126,7 +152,6 @@ $stmt->close();
 
 $agreement_download_link = "";
 if ($agreement_id) {
-    // Note: download_agreement.php expects ?id=agreement_id
     $agreement_download_link = "download_agreement.php?id=" . urlencode($agreement_id);
 }
 
@@ -151,7 +176,6 @@ $inspection_return = (
     !empty($booking['return_datetime']) &&
     $has_return_img
 );
-// Add pickup_filled variable
 $pickup_filled = (
     !empty($booking['pickup_mileage']) &&
     !empty($booking['pickup_fuel_percent']) &&
@@ -200,10 +224,10 @@ body { background: #eceef4; }
     font-size: 0.98em;
     display: inline-block;
 }
-.status-pending { background: #fffbe7; color: #bfa800; }
+.status-pending, .status-waiting_verification { background: #fffbe7; color: #bfa800; }
 .status-confirmed, .status-upcoming { background: #f7faff; color: #2f377d; }
 .status-completed { background: #e3fbe6; color: #219150; }
-.status-cancelled { background: #fde9e9; color: #d42d2d; }
+.status-cancelled, .status-rejected { background: #fde9e9; color: #d42d2d; }
 .back-btn {
     background: #ccc;
     color: #222;
@@ -283,32 +307,147 @@ body { background: #eceef4; }
     font-weight: 500;
 }
 .einspection-btn:hover { background: #e9eef7; }
+.action-form-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 18px;
+    margin-bottom: 10px;
+    background: #f8fafc;
+    border-radius: 10px;
+    padding: 14px 20px;
+    box-shadow: 0 2.5px 10px #e5e8f3a5;
+    width: fit-content;
+}
+.action-btn {
+    padding: 10px 30px;
+    border-radius: 8px;
+    border: none;
+    color: #fff;
+    font-size: 1.09em;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background 0.18s, box-shadow 0.14s;
+    margin: 0;
+    box-shadow: 0 2px 7px #2bc96018;
+    outline: none;
+    border: 2px solid transparent;
+    display: inline-block;
+}
+.action-btn.approve {
+    background: #23c960;
+}
+.action-btn.approve:focus,
+.action-btn.approve:hover {
+    background: #1ea753;
+    border-color: #19a34c;
+}
+.action-btn.reject {
+    background: #e54848;
+}
+.action-btn.reject:focus,
+.action-btn.reject:hover {
+    background: #b32d2d;
+    border-color: #b32d2d;
+}
+.rejection-reason-input {
+    padding: 10px 17px;
+    border: 1.5px solid #e1e6f3;
+    font-size: 1.03em;
+    min-width: 230px;
+    outline: none;
+    background: #fff;
+    color: #31436e;
+    font-weight: 500;
+    border-radius: 7px;
+    transition: border 0.15s;
+    margin-left: 12px;
+    margin-right: 0;
+    display: none;
+}
+.rejection-reason-input:focus {
+    border-color: #4156c7;
+    background: #f2f7ff;
+}
+@media (max-width: 600px) {
+    .action-form-row {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 10px;
+        padding: 10px 7px;
+        width: 100%;
+    }
+    .action-btn,
+    .rejection-reason-input {
+        border-radius: 8px !important;
+        border: 1.5px solid #e1e6f3 !important;
+        box-shadow: none !important;
+        margin: 0 !important;
+        width: 100%;
+    }
+}
 </style>
 
 <div class="review-section">
     <div class="review-title">Booking Details (Admin View)</div>
+    <?php if (!empty($_SESSION['flash_message'])): ?>
+        <div style="background:#e6fcf3;color:#218c6d;padding:10px 20px;border-radius:7px;margin-bottom:10px;">
+            <?= htmlspecialchars($_SESSION['flash_message']); unset($_SESSION['flash_message']); ?>
+        </div>
+    <?php endif; ?>
 
-<!-- E-INSPECTION SECTION -->
-<div class="einspection-label">E-INSPECTION</div>
-<div class="einspection-row">
-    <a class="einspection-btn<?= $pickup_filled ? ' done' : '' ?>" href="inspection_add.php?booking_id=<?= $booking_id ?>&type=pickup">
-        <?php if ($pickup_filled): ?>
-            <svg viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="10" fill="#17C964"/><path d="M14.3 8.3a1 1 0 1 0-1.6-1.2l-3 4-1.4-1.3A1 1 0 1 0 6.3 11.2l2.1 1.8a1 1 0 0 0 1.4-.2l3.5-4.5Z" fill="#fff"/></svg>
-        <?php else: ?>
-            <svg width="16" height="16" fill="none"><rect width="16" height="16" rx="8" fill="#b5bee5"/><path d="M8 4v8M4 8h8" stroke="#222" stroke-width="1.5" stroke-linecap="round"/></svg>
-        <?php endif; ?>
-        Pickup
-    </a>
-    <a class="einspection-btn<?= $inspection_return ? ' done' : '' ?>" href="inspection_add.php?booking_id=<?= $booking_id ?>&type=return">
-        <?php if ($inspection_return): ?>
-            <svg viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="10" fill="#17C964"/><path d="M14.3 8.3a1 1 0 1 0-1.6-1.2l-3 4-1.4-1.3A1 1 0 1 0 6.3 11.2l2.1 1.8a1 1 0 0 0 1.4-.2l3.5-4.5Z" fill="#fff"/></svg>
-        <?php else: ?>
-            <svg width="16" height="16" fill="none"><rect width="16" height="16" rx="8" fill="#b5bee5"/><path d="M8 4v8M4 8h8" stroke="#222" stroke-width="1.5" stroke-linecap="round"/></svg>
-        <?php endif; ?>
-        Return
-    </a>
-</div>
-<!-- End E-INSPECTION SECTION -->
+    <?php $status = strtolower($booking['status']); ?>
+    <?php if ($status == 'waiting_verification'): ?>
+        <form method="post" action="booking_details.php?id=<?= $booking_id ?>" class="action-form-row" id="approvalForm" autocomplete="off" onsubmit="return validateRejectReason();">
+            <button type="submit" name="booking_action" value="approve" class="action-btn approve">Approve</button>
+            <button type="button" id="rejectBtn" class="action-btn reject" style="margin-left:12px;">Reject</button>
+            <input type="text" name="rejection_reason" class="rejection-reason-input" id="rejectionReason" placeholder="Enter rejection reason..." autocomplete="off">
+            <button type="submit" name="booking_action" value="reject" id="confirmRejectBtn" class="action-btn reject" style="display:none;margin-left:12px;">Confirm Reject</button>
+        </form>
+        <script>
+        document.getElementById('rejectBtn').addEventListener('click', function() {
+            document.getElementById('rejectionReason').style.display = 'inline-block';
+            document.getElementById('confirmRejectBtn').style.display = 'inline-block';
+            document.getElementById('rejectionReason').focus();
+            this.style.display = 'none';
+        });
+        function validateRejectReason() {
+            var reasonInput = document.getElementById('rejectionReason');
+            var confirmBtn = document.getElementById('confirmRejectBtn');
+            if (confirmBtn.style.display === 'inline-block' && confirmBtn === document.activeElement) {
+                if (!reasonInput.value.trim()) {
+                    reasonInput.style.borderColor = "#e54848";
+                    reasonInput.focus();
+                    return false;
+                }
+            }
+            return true;
+        }
+        </script>
+        <hr>
+    <?php elseif ($status != 'cancelled' && $status != 'rejected'): ?>
+        <!-- E-INSPECTION section: only for statuses that are NOT cancelled or rejected -->
+        <div class="einspection-label">E-INSPECTION</div>
+        <div class="einspection-row">
+            <a class="einspection-btn<?= $pickup_filled ? ' done' : '' ?>" href="inspection_add.php?booking_id=<?= $booking_id ?>&type=pickup">
+                <?php if ($pickup_filled): ?>
+                    <svg viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="10" fill="#17C964"/><path d="M14.3 8.3a1 1 0 1 0-1.6-1.2l-3 4-1.4-1.3A1 1 0 1 0 6.3 11.2l2.1 1.8a1 1 0 0 0 1.4-.2l3.5-4.5Z" fill="#fff"/></svg>
+                <?php else: ?>
+                    <svg width="16" height="16" fill="none"><rect width="16" height="16" rx="8" fill="#b5bee5"/><path d="M8 4v8M4 8h8" stroke="#222" stroke-width="1.5" stroke-linecap="round"/></svg>
+                <?php endif; ?>
+                Pickup
+            </a>
+            <a class="einspection-btn<?= $inspection_return ? ' done' : '' ?>" href="inspection_add.php?booking_id=<?= $booking_id ?>&type=return">
+                <?php if ($inspection_return): ?>
+                    <svg viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="10" fill="#17C964"/><path d="M14.3 8.3a1 1 0 1 0-1.6-1.2l-3 4-1.4-1.3A1 1 0 1 0 6.3 11.2l2.1 1.8a1 1 0 0 0 1.4-.2l3.5-4.5Z" fill="#fff"/></svg>
+                <?php else: ?>
+                    <svg width="16" height="16" fill="none"><rect width="16" height="16" rx="8" fill="#b5bee5"/><path d="M8 4v8M4 8h8" stroke="#222" stroke-width="1.5" stroke-linecap="round"/></svg>
+                <?php endif; ?>
+                Return
+            </a>
+        </div>
+        <hr>
+    <?php endif; ?>
 
     <!-- Agreement Form Download Link -->
     <?php if ($agreement_download_link): ?>
@@ -374,18 +513,26 @@ body { background: #eceef4; }
             <th>Status</th>
             <td>
                 <?php
-                    $status = strtolower($booking['status']);
                     $status_class = 'status-upcoming';
                     if ($status == 'pending') $status_class = 'status-pending';
                     else if ($status == 'confirmed') $status_class = 'status-confirmed';
                     else if ($status == 'completed') $status_class = 'status-completed';
                     else if ($status == 'cancelled') $status_class = 'status-cancelled';
+                    else if ($status == 'waiting_verification') $status_class = 'status-waiting_verification';
+                    else if ($status == 'rejected') $status_class = 'status-rejected';
+                    else if ($status == 'approved') $status_class = 'status-pending';
                 ?>
                 <span class="status-label <?= $status_class ?>">
-                    <?= ucfirst($status) ?>
+                    <?= ucwords(str_replace('_', ' ', $status)) ?>
                 </span>
             </td>
         </tr>
+        <?php if ($status == 'rejected' && !empty($booking['rejection_reason'])): ?>
+        <tr>
+            <th>Rejection Reason</th>
+            <td style="color:#b82f2f;"><?= htmlspecialchars($booking['rejection_reason']) ?></td>
+        </tr>
+        <?php endif; ?>
     </table>
 
     <div class="section-label">Customer</div>
@@ -416,8 +563,6 @@ body { background: #eceef4; }
         <tr><th>Relationship</th><td><?= htmlspecialchars($guarantor['relationship']) ?></td></tr>
     </table>
     <?php endif; ?>
-
-    <!-- Booking Images section removed per Option A. Images are now visible only in inspection details. -->
 
     <div class="btn-row">
         <button class="back-btn" onclick="window.history.back()">Back</button>

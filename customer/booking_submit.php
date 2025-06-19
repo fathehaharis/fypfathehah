@@ -73,7 +73,7 @@ $security_deposit = 100.00;
 
 // 6. Grand total includes security deposit
 $total_price = $subtotal + $delivery_fee + $security_deposit;
-$status = 'pending';
+$status = 'waiting_verification';
 
 // 7. Insert driver info into driver table, get driver_id
 $id_front_blob = isset($driver['id_front']) && !empty($driver['id_front']) && file_exists($driver['id_front']) 
@@ -234,19 +234,19 @@ $pdf->MultiCell(0, 7, "Driver ID No: {$driver['id_no']}", 0, 'L');
 
 // Driver ID Images
 $pdf->SetFont('helvetica', 'B', 10);
-$pdf->MultiCell(0, 7, "Driver ID Images (Front & Back):", 0, 'L');
+$pdf->MultiCell(0, 7, "Driver License Images (Front & Back):", 0, 'L');
 $pdf->SetFont('helvetica', '', 10);
 if (!empty($driver_id_front_path) && file_exists($driver_id_front_path)) {
     $pdf->Image($driver_id_front_path, $pdf->GetX(), $pdf->GetY(), 60, 35, '', '', '', false, 300);
     $pdf->Ln(37);
 } else {
-    $pdf->MultiCell(0, 7, "Front ID not available.", 0, 'L');
+    $pdf->MultiCell(0, 7, "Front License not available.", 0, 'L');
 }
 if (!empty($driver_id_back_path) && file_exists($driver_id_back_path)) {
     $pdf->Image($driver_id_back_path, $pdf->GetX(), $pdf->GetY(), 60, 35, '', '', '', false, 300);
     $pdf->Ln(37);
 } else {
-    $pdf->MultiCell(0, 7, "Back ID not available.", 0, 'L');
+    $pdf->MultiCell(0, 7, "Back License not available.", 0, 'L');
 }
 
 // Guarantor section
@@ -368,10 +368,10 @@ if (isset($guarantor['guarantor_id_back']) && strpos($guarantor['guarantor_id_ba
             <td style="text-align:right; font-weight:bold; color:#203090;">RM <?= number_format($total_price,2) ?></td>
         </tr>
     </table>
-    <form action="payment.php" method="post">
-        <input type="hidden" name="booking_id" value="<?= htmlspecialchars($booking_id) ?>">
-        <button type="submit" class="next-btn">Proceed to Payment</button>
-    </form>
+    <p style="margin-top:18px; color:#3c4cb8;">
+        Your booking is pending admin approval.<br>
+        You will be notified when it is approved and can proceed to payment at that time.
+    </p>
     <p style="margin-top:18px;">
         <a href="download_agreement.php?id=<?= $agreement_id ?>" target="_blank">Download Agreement PDF</a>
     </p>

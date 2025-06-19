@@ -180,6 +180,43 @@ input[type="file"] {padding: 4px 0;}
     border-radius: 5px;
 }
 </style>
+<script>
+function calculateAgeFromIC(icNo) {
+    if (!icNo || icNo.length < 6) return '';
+    // Get YYMMDD
+    const y = parseInt(icNo.substring(0,2), 10);
+    const m = parseInt(icNo.substring(2,4), 10);
+    const d = parseInt(icNo.substring(4,6), 10);
+    if(isNaN(y) || isNaN(m) || isNaN(d)) return '';
+
+    // Assume 1900s or 2000s
+    const currentYear = new Date().getFullYear() % 100;
+    let fullYear = y + (y > currentYear ? 1900 : 2000);
+    const birthDate = new Date(fullYear, m - 1, d);
+
+    // Calculate age
+    const today = new Date();
+    let age = today.getFullYear() - birthDate.getFullYear();
+    const mDiff = today.getMonth() - birthDate.getMonth();
+    if (mDiff < 0 || (mDiff === 0 && today.getDate() < birthDate.getDate())) {
+        age--;
+    }
+    return age;
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    const icInput = document.querySelector('input[name="driver_id_no"]');
+    const ageInput = document.querySelector('input[name="driver_age"]');
+    if (icInput && ageInput) {
+        icInput.addEventListener('input', function() {
+            const age = calculateAgeFromIC(icInput.value);
+            if (age && age > 0) {
+                ageInput.value = age;
+            }
+        });
+    }
+});
+</script>
 
 <div class="form-section">
     <div class="form-title">Driver's Details</div>
@@ -204,11 +241,11 @@ input[type="file"] {padding: 4px 0;}
             <input type="text" name="driver_id_no" value="<?= htmlspecialchars($id_no) ?>" required>
         </div>
         <div class="input-row">
-            <label class="input-label">ID Front Image<span class="required-star">*</span></label>
+            <label class="input-label">License Front Image<span class="required-star">*</span></label>
             <input type="file" name="driver_id_front" accept="image/*" required>
         </div>
         <div class="input-row">
-            <label class="input-label">ID Back Image<span class="required-star">*</span></label>
+            <label class="input-label">License Back Image<span class="required-star">*</span></label>
             <input type="file" name="driver_id_back" accept="image/*" required>
         </div>
         <div class="input-row">

@@ -1,7 +1,7 @@
 <?php
 include '../connect.php';
 session_start();
-
+date_default_timezone_set('Asia/Kuala_Lumpur');
 if (!isset($_SESSION['admin_id'])) {
     header("Location: admin_login.php");
     exit;
@@ -14,25 +14,28 @@ $date = $_GET['date'] ?? date('Y-m-d');
 $field = $tab == 'return' ? 'return_datetime' : 'pickup_datetime';
 
 $query = "
-    SELECT 
-        b.booking_id,
-        b.$field as date_time,
-        s.service_type,
-        d.full_name AS driver_name,
-        c.car_id,
-        c.car_brand,
-        c.car_model,
-        c.plate_no,
-        ci.image_path AS car_image
-    FROM booking b
-    LEFT JOIN service s ON b.booking_id = s.booking_id
-    LEFT JOIN driver d ON b.driver_id = d.driver_id
-    LEFT JOIN car c ON b.car_id = c.car_id
-    LEFT JOIN (
-        SELECT car_id, image_path FROM car_image GROUP BY car_id
-    ) ci ON c.car_id = ci.car_id
-    WHERE DATE(b.$field) = ?
-    ORDER BY b.$field ASC
+  SELECT 
+      b.booking_id,
+      b.$field as date_time,
+      s.service_type,
+      d.full_name AS driver_name,
+      c.car_id,
+      c.car_brand,
+      c.car_model,
+      c.plate_no,
+      ci.image_path AS car_image
+  FROM booking b
+  LEFT JOIN service s ON b.booking_id = s.booking_id
+  LEFT JOIN driver d ON b.driver_id = d.driver_id
+  LEFT JOIN car c ON b.car_id = c.car_id
+  LEFT JOIN (
+      SELECT car_id, image_path FROM car_image WHERE car_image_id IN (
+          SELECT MIN(car_image_id) FROM car_image GROUP BY car_id
+      )
+  ) ci ON c.car_id = ci.car_id
+  WHERE DATE(b.$field) = ?
+    AND b.status NOT IN ('cancelled','rejected')
+  ORDER BY b.$field ASC
 ";
 
 $stmt = $conn->prepare($query);

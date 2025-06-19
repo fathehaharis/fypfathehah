@@ -4,7 +4,7 @@ ini_set('display_startup_errors', 1);
 error_reporting(E_ALL);
 session_start();
 include '../connect.php';
-
+date_default_timezone_set('Asia/Kuala_Lumpur');
 if (!isset($_SESSION['admin_id'])) {
     header("Location: admin_login.php");
     exit;
@@ -113,15 +113,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $insert_remarks = ($uploaded == 0) ? $remarks : "";
 
                 $stmt = $conn->prepare(
-                    "INSERT INTO booking_image (booking_id, image_path, image_type, capture_type, uploaded_at, remarks)
-                    VALUES (?, ?, ?, ?, NOW(), ?)"
+                    "INSERT INTO booking_image (booking_id, image_path, image_type, capture_type, inspection_date, uploaded_at, remarks)
+                    VALUES (?, ?, ?, ?, ?, NOW(), ?)"
                 );
                 $stmt->bind_param(
-                    "ibsss",
+                    "ibssss",
                     $booking_id,
                     $image_blob,
                     $image_type,
                     $type,
+                    $inspection_date_sql,
                     $insert_remarks
                 );
                 $stmt->send_long_data(1, $image_blob);

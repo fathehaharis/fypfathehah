@@ -1,7 +1,6 @@
 <?php
 include '../connect.php';
 session_start();
-
 date_default_timezone_set('Asia/Kuala_Lumpur');
 if (!isset($_SESSION['admin_id'])) {
     header("Location: admin_login.php");
@@ -14,7 +13,7 @@ $page = isset($_GET['page']) && is_numeric($_GET['page']) ? intval($_GET['page']
 $page = max(1, $page);
 $offset = ($page - 1) * $per_page;
 
-// Read search (only used on initial load)
+// Search
 $search = isset($_GET['search']) ? trim($_GET['search']) : '';
 
 $where = "WHERE 1=1";
@@ -32,6 +31,7 @@ if ($search !== '') {
     )";
 }
 
+// Count SQL
 $count_sql = "SELECT COUNT(DISTINCT b.booking_id) as total
     FROM booking b
     JOIN car ON b.car_id = car.car_id
@@ -41,7 +41,9 @@ $count_result = $conn->query($count_sql);
 $total = ($count_result && $row = $count_result->fetch_assoc()) ? intval($row['total']) : 0;
 $total_pages = max(1, ceil($total / $per_page));
 
+// Fetch bookings
 $sql = "SELECT b.*, 
+            b.status AS booking_status,
             car.car_model, car.car_brand, car.plate_no,
             p.payment_status, p.amount AS payment_amount
         FROM booking b
@@ -66,12 +68,19 @@ while ($row = $result->fetch_assoc()) {
     $row['car_image'] = $car_image ?: 'https://via.placeholder.com/90x60?text=No+Image';
 
     // Booking status for tab filtering
-    if (isset($row['status']) && strtolower($row['status']) === 'cancelled') {
+    $status = strtolower($row['booking_status']);
+    if ($status === 'waiting_verification') {
+        $tab_status = 'pending_approval';
+    } elseif ($status === 'pending' || $status === 'approved') {
+        $tab_status = 'pending_payment';
+    } elseif ($status === 'cancelled' || $status === 'rejected') {
         $tab_status = 'cancelled';
     } elseif ($row['pickup_datetime'] > $now) {
         $tab_status = 'upcoming';
     } elseif ($row['pickup_datetime'] <= $now && $row['return_datetime'] >= $now) {
         $tab_status = 'ongoing';
+    } elseif ($status === 'completed') {
+        $tab_status = 'completed';
     } else {
         $tab_status = 'other';
     }
@@ -327,6 +336,8 @@ body {
     </div>
     <div class="bookings-tabs-row">
         <button class="bookings-tab active" data-tab="all">All</button>
+        <button class="bookings-tab" data-tab="pending_approval">Pending Approval</button>
+        <button class="bookings-tab" data-tab="pending_payment">Pending Payment</button>
         <button class="bookings-tab" data-tab="upcoming">Upcoming</button>
         <button class="bookings-tab" data-tab="ongoing">Ongoing</button>
         <button class="bookings-tab" data-tab="cancelled">Cancelled</button>
@@ -337,7 +348,6 @@ body {
         </div>
         <form class="bookings-search-bar" method="get" action="bookings.php" autocomplete="off">
             <input type="text" name="search" id="searchInput" class="bookings-search-input" placeholder="Search booking, car, plate, date..." value="<?= htmlspecialchars($search) ?>">
-            
         </form>
     </div>
 </div>
@@ -357,7 +367,7 @@ body {
                 date('d M Y g:i A', strtotime($b['pickup_datetime'])).' '.
                 date('d M Y g:i A', strtotime($b['return_datetime'])).' '.
                 $b['payment_status'].' '.
-                $b['status']
+                $b['booking_status']
             ) ?>">
             <div class="booking-card">
                 <img class="booking-card-img" src="<?= htmlspecialchars($b['car_image']) ?>" alt="Car image">
@@ -371,18 +381,24 @@ body {
                 </div>
                 <div class="booking-card-payment">
                     <?php
-                    $is_cancelled = isset($b['status']) && strtolower($b['status']) === 'cancelled';
-                    $p = strtolower($b['payment_status']);
-                    if ($is_cancelled) {
+                    $status = strtolower($b['booking_status']);
+                    if ($status === 'cancelled' || $status === 'rejected') {
                         echo '<span class="booking-payment-badge cancelled">Cancelled</span>';
-                    } elseif ($p == 'paid') {
-                        echo '<span class="booking-payment-badge">Fully Paid</span>';
-                    } elseif ($p == 'pending') {
-                        echo '<span class="booking-payment-badge pending">Pending</span>';
-                    } elseif ($p == 'failed') {
-                        echo '<span class="booking-payment-badge failed">Failed</span>';
+                    } elseif ($status === 'waiting_verification') {
+                        echo '<span class="booking-payment-badge pending">Pending Approval</span>';
+                    } elseif ($status === 'pending' || $status === 'approved') {
+                        echo '<span class="booking-payment-badge pending">Pending Payment</span>';
                     } else {
-                        echo '<span class="booking-payment-badge unpaid">Unpaid</span>';
+                        $p = strtolower($b['payment_status']);
+                        if ($p == 'paid') {
+                            echo '<span class="booking-payment-badge">Fully Paid</span>';
+                        } elseif ($p == 'pending') {
+                            echo '<span class="booking-payment-badge pending">Pending</span>';
+                        } elseif ($p == 'failed') {
+                            echo '<span class="booking-payment-badge failed">Failed</span>';
+                        } else {
+                            echo '<span class="booking-payment-badge unpaid">Unpaid</span>';
+                        }
                     }
                     ?>
                 </div>

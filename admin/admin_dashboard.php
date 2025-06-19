@@ -25,6 +25,80 @@ $total_payments = $conn->query("SELECT COUNT(*) FROM payment WHERE payment_statu
 $today = date('Y-m-d');
 $pickup_today = $conn->query("SELECT COUNT(*) FROM booking WHERE DATE(pickup_datetime) = '$today'")->fetch_row()[0];
 $return_today = $conn->query("SELECT COUNT(*) FROM booking WHERE DATE(return_datetime) = '$today'")->fetch_row()[0];
+
+// --- Inspection Alert/Notification Logic ---
+date_default_timezone_set('Asia/Kuala_Lumpur');
+$now = date('Y-m-d H:i:s');
+$one_hour_later = date('Y-m-d H:i:s', strtotime('+1 hour'));
+
+$pickup_alerts = [];
+$stmt = $conn->prepare("
+    SELECT b.booking_id, b.pickup_datetime, c.car_brand, c.car_model, c.plate_no, cust.full_name, b.pickup_mileage, b.pickup_fuel_percent
+    FROM booking b
+    JOIN car c ON b.car_id = c.car_id
+    LEFT JOIN customer cust ON b.cust_id = cust.cust_id
+    WHERE b.pickup_datetime >= ? AND b.pickup_datetime < ? 
+      AND (b.pickup_mileage IS NULL OR b.pickup_fuel_percent IS NULL)
+      AND b.status IN ('confirmed','upcoming')
+    ORDER BY b.pickup_datetime ASC
+");
+$stmt->bind_param("ss", $now, $one_hour_later);
+$stmt->execute();
+$result = $stmt->get_result();
+while ($row = $result->fetch_assoc()) {
+    $pickup_alerts[] = $row;
+}
+$stmt->close();
+
+$return_alerts = [];
+$stmt = $conn->prepare("
+    SELECT b.booking_id, b.return_datetime, c.car_brand, c.car_model, c.plate_no, cust.full_name, b.return_mileage, b.return_fuel_percent
+    FROM booking b
+    JOIN car c ON b.car_id = c.car_id
+    LEFT JOIN customer cust ON b.cust_id = cust.cust_id
+    WHERE b.return_datetime >= ? AND b.return_datetime < ? 
+      AND (b.return_mileage IS NULL OR b.return_fuel_percent IS NULL)
+      AND b.status IN ('confirmed','approved','upcoming','completed')
+    ORDER BY b.return_datetime ASC
+");
+$stmt->bind_param("ss", $now, $one_hour_later);
+$stmt->execute();
+$result = $stmt->get_result();
+while ($row = $result->fetch_assoc()) {
+    $return_alerts[] = $row;
+}
+$stmt->close();
+
+// --- Approval Alert/Notification Logic ---
+$approval_alerts = [];
+$stmt = $conn->prepare("
+    SELECT b.booking_id, c.car_brand, c.car_model, c.plate_no, cust.full_name, b.created_at
+    FROM booking b
+    JOIN car c ON b.car_id = c.car_id
+    LEFT JOIN customer cust ON b.cust_id = cust.cust_id
+    WHERE b.status = 'waiting_verification'
+    ORDER BY b.created_at ASC
+");
+$stmt->execute();
+$result = $stmt->get_result();
+while ($row = $result->fetch_assoc()) {
+    $approval_alerts[] = $row;
+}
+$stmt->close();
+
+// --- Refund Alert/Notification Logic ---
+$refund_alerts = [];
+$refund_sql = "SELECT r.refund_id, r.booking_id, r.amount, r.created_at, c.full_name, car.car_brand, car.car_model, car.plate_no
+               FROM refunds r
+               LEFT JOIN booking b ON r.booking_id = b.booking_id
+               LEFT JOIN customer c ON b.cust_id = c.cust_id
+               LEFT JOIN car ON b.car_id = car.car_id
+               WHERE r.refund_status = 'pending'
+               ORDER BY r.created_at ASC";
+$res = $conn->query($refund_sql);
+while ($res && $res->num_rows > 0 && $row = $res->fetch_assoc()) {
+    $refund_alerts[] = $row;
+}
 ?>
 <?php include 'admin_header.php'; ?>
 
@@ -116,6 +190,64 @@ $return_today = $conn->query("SELECT COUNT(*) FROM booking WHERE DATE(return_dat
   border: 2px solid #e4eaff;
   background: linear-gradient(120deg, #f8fafd 70%, #e5f3ff 100%);
 }
+.alert-inspection, .alert-approval, .alert-refund {
+  background: #fffbe7;
+  color: #bfa800;
+  border: 1.5px solid #ffe877;
+  border-radius: 8px;
+  margin-bottom: 28px;
+  padding: 20px 30px 14px 30px;
+  font-size: 1.11em;
+  box-shadow: 0 2px 8px #ffd60022;
+  position: relative;
+}
+.alert-refund {
+    background: #ffe9e7;
+    color: #e54848;
+    border: 1.5px solid #ffb3b3;
+    box-shadow: 0 2px 8px #ffb3b333;
+}
+.alert-refund strong { color: #b32d2d; }
+.alert-refund ul { margin-top: 12px; margin-bottom: 0; padding-left: 20px; }
+.alert-refund li { margin-bottom: 8px; font-size: 1.02em; }
+.alert-refund .refund-amount { font-weight: 600; color: #b32d2d; }
+.alert-approval strong, .alert-inspection strong {
+  color: #a65c00;
+}
+.alert-inspection .inspection-list,
+.alert-approval .approval-list,
+.alert-refund .refund-list {
+  margin-top: 12px;
+  margin-bottom: 0;
+  padding-left: 20px;
+}
+.alert-inspection .inspection-item,
+.alert-approval .approval-item,
+.alert-refund .refund-item {
+  margin-bottom: 8px;
+  font-size: 1.02em;
+}
+.alert-approval {
+  background: #ffe9e7;
+  color: #e54848;
+  border: 1.5px solid #ffb3b3;
+  box-shadow: 0 2px 8px #ffb3b333;
+}
+.alert-approval strong { color: #b32d2d; }
+.alert-approval a {
+  color: #fff;
+  background: #e54848;
+  padding: 4px 12px;
+  border-radius: 5px;
+  font-weight: 600;
+  text-decoration: none;
+  font-size: 0.98em;
+  margin-left: 16px;
+}
+.alert-approval a:hover { background: #b32d2d; }
+@media (max-width: 900px) {
+  .alert-inspection, .alert-approval, .alert-refund { padding: 12px 8vw 8px 8vw; }
+}
 @media (max-width: 900px) {
   .admin-layout { flex-direction: column; }
   .admin-sidebar { flex-direction: row; width: 100%; min-height: unset; padding: 0;}
@@ -136,6 +268,7 @@ $return_today = $conn->query("SELECT COUNT(*) FROM booking WHERE DATE(return_dat
     <a href="bookings.php">Bookings</a>
     <a href="drivers.php">Drivers</a>
     <a href="payments.php">Payments And Refunds</a>
+    <a href="services.php">Delivery Services</a>
   </nav>
   <main class="admin-main-content">
     <div class="dashboard-header">
@@ -143,6 +276,57 @@ $return_today = $conn->query("SELECT COUNT(*) FROM booking WHERE DATE(return_dat
         👋 Welcome<?= $admin_name ? ', ' . htmlspecialchars($admin_name) : '' ?>!
       </span>
     </div>
+
+    <?php if (!empty($refund_alerts)): ?>
+      <div class="alert-refund">
+        <strong>Action Required:</strong> The following refunds are <strong>pending</strong> and need to be processed:
+        <ul class="refund-list">
+          <?php foreach ($refund_alerts as $alert): ?>
+            <li class="refund-item">
+              <strong>Booking #<?= htmlspecialchars($alert['booking_id']) ?></strong>
+              (<?= htmlspecialchars($alert['car_brand']) ?> <?= htmlspecialchars($alert['car_model']) ?> - <?= htmlspecialchars($alert['plate_no']) ?>,
+              <?= htmlspecialchars($alert['full_name']) ?>)
+              <span class="refund-amount">MYR <?= number_format($alert['amount'],2) ?></span>
+              <span style="color:#888;font-size:0.97em;">Requested: <?= date('Y-m-d', strtotime($alert['created_at'])) ?></span>
+              <a href="payments.php#refund-<?= intval($alert['refund_id']) ?>" style="margin-left:16px;color:#fff;background:#e54848;padding:4px 12px;border-radius:5px;font-weight:600;text-decoration:none;font-size:0.98em;">Process Refund</a>
+            </li>
+          <?php endforeach; ?>
+        </ul>
+      </div>
+    <?php endif; ?>
+
+    <?php if (!empty($approval_alerts)): ?>
+      <div class="alert-approval">
+        <strong>Action Required:</strong> The following bookings are <strong>awaiting your approval</strong>:
+        <ul class="approval-list">
+          <?php foreach ($approval_alerts as $alert): ?>
+            <li class="approval-item">
+              <strong><?= htmlspecialchars($alert['car_brand']) ?> <?= htmlspecialchars($alert['car_model']) ?> (<?= htmlspecialchars($alert['plate_no']) ?>)</strong>
+              &ndash; Booking #<?= $alert['booking_id'] ?>
+              (Customer: <?= htmlspecialchars($alert['full_name']) ?>)
+              <a href="booking_details.php?id=<?= $alert['booking_id'] ?>">Review & Approve</a>
+            </li>
+          <?php endforeach; ?>
+        </ul>
+      </div>
+    <?php endif; ?>
+
+    <?php if (!empty($pickup_alerts)): ?>
+      <div class="alert-inspection">
+        <strong>Reminder:</strong> The following cars are scheduled for customer pickup within the next hour and <strong>require inspection</strong>:
+        <ul class="inspection-list">
+          <?php foreach ($pickup_alerts as $alert): ?>
+            <li class="inspection-item">
+              <strong><?= htmlspecialchars($alert['car_brand']) ?> <?= htmlspecialchars($alert['car_model']) ?> (<?= htmlspecialchars($alert['plate_no']) ?>)</strong>
+              &ndash; Booking #<?= $alert['booking_id'] ?>, Pickup at <strong><?= date('H:i', strtotime($alert['pickup_datetime'])) ?></strong>
+              (Customer: <?= htmlspecialchars($alert['full_name']) ?>)
+              <a href="inspection_add.php?booking_id=<?= $alert['booking_id'] ?>&type=pickup">Do Inspection</a>
+            </li>
+          <?php endforeach; ?>
+        </ul>
+      </div>
+    <?php endif; ?>
+
     <div class="dashboard-stats">
       <div class="stat-card">
         <h2><?= $total_customers ?></h2>
