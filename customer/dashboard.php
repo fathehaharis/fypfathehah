@@ -45,14 +45,39 @@ $result = $conn->query($sql);
 
 <link rel="stylesheet" href="/assets/css/style.css">
 <style>
-.welcome-msg {
+.welcome-banner {
     max-width: 1200px;
     margin: 35px auto -10px auto;
     padding: 0 16px;
-    font-size: 1.23em;
-    font-weight: 500;
-    color: #2f377d;
-    letter-spacing: 0.02em;
+}
+.welcome-banner-inner {
+    display: flex;
+    align-items: center;
+    background: linear-gradient(90deg, #fcfff7 85%, #ffec8b 100%);
+    border-radius: 22px;
+    padding: 22px 36px 22px 22px;
+    box-shadow: 0 2px 8px rgba(44,60,102,0.04);
+    font-size: 2em;
+    font-weight: 800;
+    color: #2761cf;
+    letter-spacing: 0.01em;
+}
+.welcome-banner-emoji {
+    font-size: 1.3em;
+    margin-right: 18px;
+    animation: wave-hand 2.2s infinite;
+    display: inline-block;
+    transform-origin: 70% 70%;
+}
+@keyframes wave-hand {
+    0% { transform: rotate(0.0deg);}
+    10% { transform: rotate(16.0deg);}
+    20% { transform: rotate(-6.0deg);}
+    30% { transform: rotate(16.0deg);}
+    40% { transform: rotate(-4.0deg);}
+    50% { transform: rotate(12.0deg);}
+    60% { transform: rotate(0.0deg);}
+    100% { transform: rotate(0.0deg);}
 }
 .cars-container {
     max-width: 1200px;
@@ -129,8 +154,11 @@ $result = $conn->query($sql);
 }
 </style>
 
-<div class="welcome-msg">
-    Hi, welcome <?= htmlspecialchars($customer_name) ?>!
+<div class="welcome-banner">
+    <div class="welcome-banner-inner">
+        <span class="welcome-banner-emoji">👋</span>
+        Welcome, <?= htmlspecialchars($customer_name) ?>!
+    </div>
 </div>
 
 <div class="cars-container">

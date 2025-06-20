@@ -10,6 +10,7 @@ unset($_SESSION['suggested_username']);
 ?>
 <link rel="stylesheet" href="/assets/css/style.css">
 <link rel="icon" type="image/png" href="/assets/images/TimeLess_logo.png">
+<title>Register</title>
 <style>
 .password-policy {
   background: #f8faff;
