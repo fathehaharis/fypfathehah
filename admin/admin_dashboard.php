@@ -271,6 +271,8 @@ while ($res && $res->num_rows > 0 && $row = $res->fetch_assoc()) {
     <a href="drivers.php">Drivers</a>
     <a href="payments.php">Payments And Refunds</a>
     <a href="services.php">Delivery Services</a>
+    <a href="report_monthly_income.php">Monthly Income Report</a>
+    <a href="report_daily_income.php">Daily Income Report</a>
   </nav>
   <main class="admin-main-content">
     <div class="dashboard-header">
