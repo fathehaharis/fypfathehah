@@ -9,7 +9,7 @@ require_once __DIR__ . '/../connect.php'; // Adjust path as needed
 
 // Only update bookings whose return_datetime < NOW() and status is 'confirmed' or 'pending'
 $sql = "UPDATE booking SET status = 'completed'
-        WHERE status IN ('confirmed', 'pending') AND return_datetime < NOW()";
+        WHERE status IN ('confirmed') AND return_datetime < NOW()";
 
 if ($conn->query($sql) === TRUE) {
     // Optional: logging for success

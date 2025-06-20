@@ -233,13 +233,25 @@ $bookings = $result->fetch_all(MYSQLI_ASSOC);
     <a href="?tab=pickup&date=<?= htmlspecialchars($date) ?>" class="pickupreturn-tab<?= $tab=='pickup' ? ' selected' : '' ?>">Pickup</a>
     <a href="?tab=return&date=<?= htmlspecialchars($date) ?>" class="pickupreturn-tab<?= $tab=='return' ? ' selected' : '' ?>">Return</a>
   </div>
-  <div class="pickupreturn-tabs-underline"></div>
-  <form method="get" class="pickupreturn-filter-row">
+<form method="get" class="pickupreturn-filter-row">
     <input type="hidden" name="tab" value="<?= htmlspecialchars($tab) ?>">
     <label for="date-filter">Date</label>
     <input type="date" id="date-filter" name="date" value="<?= htmlspecialchars($date) ?>">
     <button type="submit">Filter</button>
-  </form>
+</form>
+<!-- Place the script here -->
+<script>
+document.addEventListener("DOMContentLoaded", function() {
+    var dateInput = document.getElementById('date-filter');
+    if (dateInput && !dateInput.value) {
+        var today = new Date();
+        var yyyy = today.getFullYear();
+        var mm = String(today.getMonth() + 1).padStart(2, '0');
+        var dd = String(today.getDate()).padStart(2, '0');
+        dateInput.value = yyyy + '-' + mm + '-' + dd;
+    }
+});
+</script>
   <div class="booking-card-list">
     <?php if (!$bookings): ?>
       <div style="color:#888;background:#fff;border-radius:10px;padding:30px;box-shadow:0 4px 16px #ccc;">
@@ -279,5 +291,6 @@ $bookings = $result->fetch_all(MYSQLI_ASSOC);
     <?php endif; ?>
   </div>
 </div>
+
 
 <?php include '../includes/footer.php'; ?>

@@ -10,33 +10,64 @@ if (!isset($_SESSION['staff_id'])) {
 $staff_id = $_SESSION['staff_id'];
 $staff_name = $_SESSION['staff_name'];
 
-// Handle status update
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_status'], $_POST['service_id'])) {
-    $service_id = intval($_POST['service_id']);
-    $new_status = $_POST['status'];
-    $allowed_statuses = ['pending', 'out_for_delivery', 'delivered'];
-    if (in_array($new_status, $allowed_statuses)) {
-        $stmt = $conn->prepare("UPDATE service SET status = ? WHERE service_id = ? AND staff_id = ?");
-        $stmt->bind_param("sii", $new_status, $service_id, $staff_id);
-        $stmt->execute();
-        $stmt->close();
-        $success_msg = "Service status updated successfully.";
-    } else {
-        $error_msg = "Invalid status.";
-    }
+// Filtering (status tabs)
+$allowed_statuses = ['pending', 'out_for_delivery', 'delivered'];
+$status_filter = isset($_GET['status']) && in_array($_GET['status'], $allowed_statuses) ? $_GET['status'] : 'all';
+
+// Filtering (search)
+$search = isset($_GET['search']) ? trim($_GET['search']) : '';
+
+// Pagination
+$per_page = 10;
+$page = isset($_GET['page']) && is_numeric($_GET['page']) && $_GET['page'] >= 1 ? (int)$_GET['page'] : 1;
+$offset = ($page - 1) * $per_page;
+
+// Build WHERE clause
+$where = "s.staff_id = ?";
+$params = [$staff_id];
+$types = "i";
+if ($status_filter !== 'all') {
+    $where .= " AND s.status = ?";
+    $params[] = $status_filter;
+    $types .= "s";
+}
+if ($search !== "") {
+    $where .= " AND (s.service_type LIKE ? OR s.notes LIKE ? OR cu.username LIKE ? OR c.car_brand LIKE ? OR c.car_model LIKE ? OR b.booking_id LIKE ?)";
+    $search_param = "%$search%";
+    $params = array_merge($params, array_fill(0, 6, $search_param));
+    $types .= str_repeat("s", 6);
 }
 
-// Fetch assigned services for this staff, including pickup and return datetime
+// Count total
+$count_sql = "SELECT COUNT(*) as total
+        FROM service s
+        JOIN booking b ON s.booking_id = b.booking_id
+        JOIN car c ON b.car_id = c.car_id
+        JOIN customer cu ON b.cust_id = cu.cust_id
+        WHERE $where";
+$count_stmt = $conn->prepare($count_sql);
+$count_stmt->bind_param($types, ...$params);
+$count_stmt->execute();
+$count_result = $count_stmt->get_result();
+$total = ($count_result && $count_result->num_rows) ? $count_result->fetch_assoc()['total'] : 0;
+$count_stmt->close();
+$total_pages = max(1, ceil($total / $per_page));
+
+// Fetch assigned services for this staff, with filter and pagination
 $sql = "SELECT s.*, b.cust_id, c.car_brand, c.car_model, cu.username AS customer_name,
                b.pickup_datetime, b.return_datetime
         FROM service s
         JOIN booking b ON s.booking_id = b.booking_id
         JOIN car c ON b.car_id = c.car_id
         JOIN customer cu ON b.cust_id = cu.cust_id
-        WHERE s.staff_id = ?
-        ORDER BY s.service_id DESC";
+        WHERE $where
+        ORDER BY s.service_id DESC
+        LIMIT ? OFFSET ?";
+$params[] = $per_page;
+$params[] = $offset;
+$types .= "ii";
 $stmt = $conn->prepare($sql);
-$stmt->bind_param("i", $staff_id);
+$stmt->bind_param($types, ...$params);
 $stmt->execute();
 $result = $stmt->get_result();
 
@@ -45,10 +76,8 @@ while ($row = $result->fetch_assoc()) {
     $services[] = $row;
 }
 $stmt->close();
-include 'staff_header.php'; 
 
 // --- ALERT LOGIC ---
-date_default_timezone_set("Asia/Kuala_Lumpur");
 $now = new DateTime('now');
 $alerts = [];
 foreach ($services as $row) {
@@ -60,8 +89,8 @@ foreach ($services as $row) {
         $pickup = new DateTime($row['pickup_datetime']);
         $interval = $now->diff($pickup);
         if ($interval->days === 1 && $pickup > $now && $interval->invert === 0) {
-            $alerts[] = "Reminder: Deliver car to customer for Booking ID <b>{$row['booking_id']}</b> (" . 
-                htmlspecialchars($row['car_brand'].' '.$row['car_model']) . 
+            $alerts[] = "Reminder: Deliver car to customer for Booking ID <b>{$row['booking_id']}</b> (" .
+                htmlspecialchars($row['car_brand'].' '.$row['car_model']) .
                 ") at " . $pickup->format('d/m/Y H:i') . ".";
         }
     }
@@ -73,12 +102,35 @@ foreach ($services as $row) {
         $return = new DateTime($row['return_datetime']);
         $interval = $now->diff($return);
         if ($interval->days === 1 && $return > $now && $interval->invert === 0) {
-            $alerts[] = "Reminder: Pickup car from customer for Booking ID <b>{$row['booking_id']}</b> (" . 
-                htmlspecialchars($row['car_brand'].' '.$row['car_model']) . 
+            $alerts[] = "Reminder: Pickup car from customer for Booking ID <b>{$row['booking_id']}</b> (" .
+                htmlspecialchars($row['car_brand'].' '.$row['car_model']) .
                 ") at " . $return->format('d/m/Y H:i') . ".";
         }
     }
 }
+
+// Handle status update
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_status'], $_POST['service_id'])) {
+    $service_id = intval($_POST['service_id']);
+    $new_status = $_POST['status'];
+    if (in_array($new_status, $allowed_statuses)) {
+        $stmt = $conn->prepare("UPDATE service SET status = ? WHERE service_id = ? AND staff_id = ?");
+        $stmt->bind_param("sii", $new_status, $service_id, $staff_id);
+        $stmt->execute();
+        $stmt->close();
+        // Redirect to the same page to avoid resubmission and stay on the current filter/page/search
+        $q = http_build_query([
+            'status' => $status_filter,
+            'page' => $page,
+            'search' => $search
+        ]);
+        header("Location: delivery_staff_dashboard.php?$q");
+        exit;
+    } else {
+        $error_msg = "Invalid status.";
+    }
+}
+include 'staff_header.php';
 ?>
 <!DOCTYPE html>
 <html>
@@ -87,7 +139,7 @@ foreach ($services as $row) {
     <link rel="icon" type="image/png" href="/assets/images/TimeLess_logo.png">
     <link rel="stylesheet" href="/assets/css/style.css">
     <style>
-        body { background: #f7f9fa; }
+        body { background: #f7f9fa; margin:0; }
         .dashboard-container { max-width: 1100px; margin: 48px auto 0 auto; }
         .dashboard-header {
             background: #2b5cbc;
@@ -98,6 +150,59 @@ foreach ($services as $row) {
         }
         .dashboard-header h2 { margin: 0; font-size: 2.3em; letter-spacing: 1px; }
         .dashboard-header .staff-name {font-weight: 700;}
+        .tab-bar {
+            margin: 32px 0 16px 0;
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+        .tab-bar a {
+            padding: 10px 22px;
+            background: #f7fafd;
+            color: #2b5cbc;
+            border-radius: 8px 8px 0 0;
+            font-weight: 700;
+            font-size: 1.07em;
+            text-decoration: none;
+            border: 1.5px solid #e4e8f3;
+            border-bottom: none;
+            transition: background 0.12s, color 0.12s;
+        }
+        .tab-bar a.active, .tab-bar a:hover {
+            background: #2b5cbc;
+            color: #fff;
+            border-color: #2b5cbc;
+        }
+        .services-search-bar {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 14px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .services-search-bar input[type=text] {
+            padding: 9px 14px;
+            border-radius: 7px;
+            border: 1.5px solid #b5bee5;
+            font-size: 1.05em;
+            background: #f7fafd;
+            width: 200px;
+            max-width: 50vw;
+        }
+        .services-search-bar button {
+            padding: 9px 19px;
+            background: #2b5cbc;
+            color: #fff;
+            border: none;
+            border-radius: 7px;
+            font-weight: 600;
+            font-size: 1.03em;
+            cursor: pointer;
+            transition: background 0.14s;
+        }
+        .services-search-bar button:hover {
+            background: #243570;
+        }
         .assigned-table {
             width: 100%;
             border-collapse: collapse;
@@ -162,7 +267,36 @@ foreach ($services as $row) {
             box-shadow: 0 2px 12px #ffe7b355;
             font-weight: bold;
         }
-        @media (max-width: 900px) {
+        .pagination {
+            display: flex;
+            justify-content: center;
+            gap: 8px;
+            margin: 22px 0 0 0;
+        }
+        .pagination a, .pagination span {
+            padding: 7px 15px;
+            border-radius: 6px;
+            background: #f5f5fd;
+            color: #2b5cbc;
+            text-decoration: none;
+            font-weight: 600;
+            border: 1.5px solid #e4e8f3;
+            min-width: 31px;
+            text-align: center;
+            transition: background 0.12s, color 0.12s;
+        }
+        .pagination a:hover {
+            background: #2b5cbc;
+            color: #fff;
+        }
+        .pagination .current {
+            background: #2b5cbc;
+            color: #fff;
+            border-color: #2b5cbc;
+            pointer-events: none;
+        }
+        @media (max-width: 700px) {
+            .dashboard-container { padding: 0 2vw; }
             .dashboard-header { padding: 14px 8px; }
             .dashboard-header h2 { font-size: 1.5em;}
             .alert-box { font-size: 0.97em; }
@@ -175,6 +309,24 @@ foreach ($services as $row) {
             <h2>Welcome, <span class="staff-name"><?= htmlspecialchars($staff_name) ?></span></h2>
             <div style="margin-top:7px;">This is your delivery staff dashboard.</div>
         </div>
+
+        <!-- Tabs -->
+        <div class="tab-bar">
+            <a href="delivery_staff_dashboard.php?status=all&search=<?= urlencode($search) ?>" class="<?= $status_filter == 'all' ? 'active' : '' ?>">All</a>
+            <a href="delivery_staff_dashboard.php?status=pending&search=<?= urlencode($search) ?>" class="<?= $status_filter == 'pending' ? 'active' : '' ?>">Pending</a>
+            <a href="delivery_staff_dashboard.php?status=out_for_delivery&search=<?= urlencode($search) ?>" class="<?= $status_filter == 'out_for_delivery' ? 'active' : '' ?>">Out for Delivery</a>
+            <a href="delivery_staff_dashboard.php?status=delivered&search=<?= urlencode($search) ?>" class="<?= $status_filter == 'delivered' ? 'active' : '' ?>">Delivered</a>
+        </div>
+
+        <!-- Search Bar -->
+        <form class="services-search-bar" method="get" action="delivery_staff_dashboard.php" autocomplete="off">
+            <input type="hidden" name="status" value="<?= htmlspecialchars($status_filter) ?>">
+            <input type="text" name="search" placeholder="Search service, customer, car..." value="<?= htmlspecialchars($search) ?>">
+            <button type="submit">Search</button>
+            <?php if ($search): ?>
+                <a href="delivery_staff_dashboard.php?status=<?= urlencode($status_filter) ?>" style="margin-left:15px;color:#888;font-size:0.98em;">Clear</a>
+            <?php endif; ?>
+        </form>
 
         <?php if (!empty($alerts)): ?>
             <?php foreach ($alerts as $alert): ?>
@@ -213,7 +365,7 @@ foreach ($services as $row) {
             <?php else: ?>
                 <?php foreach ($services as $i => $row): ?>
                     <tr>
-                        <td><?= $i + 1 ?></td>
+                        <td><?= $offset + $i + 1 ?></td>
                         <td><?= htmlspecialchars($row['service_type']) ?></td>
                         <td><?= htmlspecialchars($row['booking_id']) ?></td>
                         <td><?= htmlspecialchars($row['customer_name']) ?></td>
@@ -243,6 +395,28 @@ foreach ($services as $row) {
             </tbody>
         </table>
         </div>
+        <!-- Pagination -->
+        <?php if ($total_pages > 1): ?>
+        <div class="pagination">
+            <?php if ($page > 1): ?>
+                <a href="?status=<?= urlencode($status_filter) ?>&search=<?= urlencode($search) ?>&page=1">&laquo; First</a>
+                <a href="?status=<?= urlencode($status_filter) ?>&search=<?= urlencode($search) ?>&page=<?= $page-1 ?>">&lt; Prev</a>
+            <?php endif; ?>
+            <?php
+            $range = 2;
+            for ($p = max(1, $page - $range); $p <= min($total_pages, $page + $range); $p++): ?>
+                <?php if ($p == $page): ?>
+                    <span class="current"><?= $p ?></span>
+                <?php else: ?>
+                    <a href="?status=<?= urlencode($status_filter) ?>&search=<?= urlencode($search) ?>&page=<?= $p ?>"><?= $p ?></a>
+                <?php endif; ?>
+            <?php endfor; ?>
+            <?php if ($page < $total_pages): ?>
+                <a href="?status=<?= urlencode($status_filter) ?>&search=<?= urlencode($search) ?>&page=<?= $page+1 ?>">Next &gt;</a>
+                <a href="?status=<?= urlencode($status_filter) ?>&search=<?= urlencode($search) ?>&page=<?= $total_pages ?>">Last &raquo;</a>
+            <?php endif; ?>
+        </div>
+        <?php endif; ?>
     </div>
 </body>
 </html>

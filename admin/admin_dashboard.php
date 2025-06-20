@@ -2,6 +2,8 @@
 include '../connect.php';
 session_start();
 
+date_default_timezone_set('Asia/Kuala_Lumpur');
+
 if (!isset($_SESSION['admin_id'])) {
     header("Location: admin_login.php");
     exit;
@@ -23,11 +25,11 @@ $total_cars = $conn->query("SELECT COUNT(*) FROM car")->fetch_row()[0];
 $total_bookings = $conn->query("SELECT COUNT(*) FROM booking")->fetch_row()[0];
 $total_payments = $conn->query("SELECT COUNT(*) FROM payment WHERE payment_status = 'paid'")->fetch_row()[0];
 $today = date('Y-m-d');
-$pickup_today = $conn->query("SELECT COUNT(*) FROM booking WHERE DATE(pickup_datetime) = '$today'")->fetch_row()[0];
-$return_today = $conn->query("SELECT COUNT(*) FROM booking WHERE DATE(return_datetime) = '$today'")->fetch_row()[0];
+$pickup_today = $conn->query("SELECT COUNT(*) FROM booking WHERE DATE(pickup_datetime) = '$today' AND status NOT IN ('cancelled','rejected')")->fetch_row()[0];
+$return_today = $conn->query("SELECT COUNT(*) FROM booking WHERE DATE(return_datetime) = '$today' AND status NOT IN ('cancelled','rejected')")->fetch_row()[0];
 
 // --- Inspection Alert/Notification Logic ---
-date_default_timezone_set('Asia/Kuala_Lumpur');
+
 $now = date('Y-m-d H:i:s');
 $one_hour_later = date('Y-m-d H:i:s', strtotime('+1 hour'));
 

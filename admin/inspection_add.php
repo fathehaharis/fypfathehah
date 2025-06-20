@@ -19,7 +19,7 @@ if (!$booking_id) {
     exit;
 }
 
-// Fetch car info for display and mileage
+// Fetch booking and car info
 $stmt = $conn->prepare("
     SELECT b.*, c.car_brand, c.car_model, c.plate_no, c.mileage as car_mileage, c.car_id
     FROM booking b
@@ -48,12 +48,22 @@ $stmt->execute();
 $images = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
 $stmt->close();
 
+// Check if inspection is already filled
 $is_filled = false;
 if ($type === 'pickup') {
     $is_filled = !empty($booking['pickup_mileage']) && !empty($booking['pickup_fuel_percent']) && !empty($booking['pickup_datetime']) && count($images) > 0;
 } else {
     $is_filled = !empty($booking['return_mileage']) && !empty($booking['return_fuel_percent']) && !empty($booking['return_datetime']) && count($images) > 0;
 }
+
+// Fetch inspection date for this type (from booking_image, first image uploaded)
+$inspection_date_display = '';
+$stmt = $conn->prepare("SELECT inspection_date FROM booking_image WHERE booking_id=? AND capture_type=? ORDER BY uploaded_at ASC LIMIT 1");
+$stmt->bind_param("is", $booking_id, $type);
+$stmt->execute();
+$stmt->bind_result($inspection_date_display);
+$stmt->fetch();
+$stmt->close();
 
 // Handle form submission
 $errors = [];
@@ -71,13 +81,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $inspection_date_sql = date('Y-m-d H:i:s');
     }
 
+    // Update only mileage and fuel percent, NOT pickup/return datetime!
     if ($type == 'pickup') {
-        $booking_update_sql = "UPDATE booking SET pickup_mileage=?, pickup_fuel_percent=?, pickup_datetime=? WHERE booking_id=?";
+        $booking_update_sql = "UPDATE booking SET pickup_mileage=?, pickup_fuel_percent=? WHERE booking_id=?";
+        $stmt = $conn->prepare($booking_update_sql);
+        $stmt->bind_param('iii', $mileage, $fuel_percent, $booking_id);
     } else {
-        $booking_update_sql = "UPDATE booking SET return_mileage=?, return_fuel_percent=?, return_datetime=? WHERE booking_id=?";
+        $booking_update_sql = "UPDATE booking SET return_mileage=?, return_fuel_percent=? WHERE booking_id=?";
+        $stmt = $conn->prepare($booking_update_sql);
+        $stmt->bind_param('iii', $mileage, $fuel_percent, $booking_id);
     }
-    $stmt = $conn->prepare($booking_update_sql);
-    $stmt->bind_param('iisi', $mileage, $fuel_percent, $inspection_date_sql, $booking_id);
     $stmt->execute();
     $stmt->close();
 
@@ -293,7 +306,9 @@ body { background: #f8f9fb; }
             <div class="details-label">Fuel Percent (%):</div>
             <div class="details-value"><?= htmlspecialchars($type === 'pickup' ? $booking['pickup_fuel_percent'] : $booking['return_fuel_percent']) ?></div>
             <div class="details-label">Inspection Date:</div>
-            <div class="details-value"><?= htmlspecialchars($type === 'pickup' ? $booking['pickup_datetime'] : $booking['return_datetime']) ?></div>
+            <div class="details-value">
+                <?= !empty($inspection_date_display) ? htmlspecialchars($inspection_date_display) : '-' ?>
+            </div>
             <?php
                 $first_remark = '';
                 foreach ($images as $img) {
