@@ -152,6 +152,46 @@ $result = $conn->query($sql);
     color: #c62828;
     font-size: 1.18em;
 }
+.pickup-location-banner {
+    max-width: 1200px;
+    margin: 20px auto 0 auto;
+    padding: 16px 25px;
+    background: linear-gradient(90deg, #e3f0ff 80%, #fff6d1 100%);
+    border-radius: 18px;
+    font-size: 1.15em;
+    color: #21408a;
+    font-weight: 500;
+    display: flex;
+    align-items: flex-start;
+    gap: 16px;
+    box-shadow: 0 2px 10px rgba(33,64,138,0.09);
+}
+.pickup-location-icon {
+    font-size: 2em;
+    margin-top: 2px;
+}
+.pickup-address {
+    color: #1a2d6c;
+    font-weight: 600;
+    display: inline-block;
+    margin-top: 2px;
+    margin-bottom: 2px;
+}
+.pickup-map-link {
+    margin-left: 8px;
+    color: #2278d4;
+    text-decoration: underline;
+    font-weight: 500;
+}
+.pickup-map-link:hover {
+    color: #234c96;
+}
+.pickup-note {
+    display: block;
+    font-size: 0.97em;
+    color: #555;
+    margin-top: 4px;
+}
 </style>
 
 <div class="welcome-banner">
@@ -160,7 +200,23 @@ $result = $conn->query($sql);
         Welcome, <?= htmlspecialchars($customer_name) ?>!
     </div>
 </div>
-
+<div class="pickup-location-banner">
+    <span class="pickup-location-icon">📍</span>
+    <span>
+      <strong>Self-Pickup Location:</strong>
+      <br>
+      <span class="pickup-address">
+        DT 1564, JALAN BUKIT TAMBUN PERDANA 21,<br>
+        TAMAN BUKIT TAMBUN PERDANA,<br>
+        76100 DURIAN TUNGGAL, MELAKA
+      </span>
+      <br>
+      <span class="pickup-note">
+        You may collect your booked car directly from our rental location above. 
+        <a href="https://maps.google.com/?q=DT+1564,+JALAN+BUKIT+TAMBUN+PERDANA+21,+TAMAN+BUKIT+TAMBUN+PERDANA,+76100+DURIAN+TUNGGAL,+MELAKA" target="_blank" class="pickup-map-link">View on Google Maps</a>
+      </span>
+    </span>
+</div>
 <div class="cars-container">
 <?php if ($result && $result->num_rows > 0): ?>
     <?php while ($car = $result->fetch_assoc()): ?>
