@@ -275,7 +275,7 @@ if (!empty($guar_id_back_path) && file_exists($guar_id_back_path)) {
 // Signature
 $pdf->Ln(7);
 $pdf->SetFont('helvetica', 'B', 11);
-$pdf->MultiCell(0, 7, "Customer Signature:", 0, 'L');
+$pdf->MultiCell(0, 7, "Driver Signature:", 0, 'L');
 $pdf->Image($signature_path, $pdf->GetX(), $pdf->GetY(), 60, 30, 'PNG');
 $pdf->Ln(35);
 
