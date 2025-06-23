@@ -290,13 +290,9 @@ function getCarImage($conn, $car_id) {
     letter-spacing: 0.3px;
     margin-left: auto;
 }
-.car-card-status.rented {
+.car-card-status.not-available {
     background: #ffeded;
     color: #e54848;
-}
-.car-card-status.maintenance {
-    background: #fff7e6;
-    color: #e7a84b;
 }
 @media (max-width: 700px) {
     .car-card-list, .fleet-header { max-width: 98vw; }
@@ -369,15 +365,12 @@ function closeCarFilterModal(e) {
                 <span class="car-card-title"><?= strtoupper(htmlspecialchars($car['car_brand'])) ?> <?= htmlspecialchars($car['car_model']) ?></span>
                 <span class="car-card-plate"><?= htmlspecialchars($car['plate_no']) ?></span>
             </div>
-            <?php if ($car['status'] == 'available'): ?>
-                <span class="car-card-status">Available</span>
-            <?php elseif ($car['status'] == 'rented'): ?>
-                <span class="car-card-status rented">Rented</span>
-            <?php elseif ($car['status'] == 'maintenance'): ?>
-                <span class="car-card-status maintenance">Maintenance</span>
-            <?php else: ?>
-                <span class="car-card-status"><?= htmlspecialchars($car['status']) ?></span>
-            <?php endif; ?>
+            <?php
+                // Only show "Available" or "Not Available"
+                $car_status = strtolower($car['status']) == "available" ? "available" : "not available";
+                $status_class = $car_status == "available" ? "" : " not-available";
+            ?>
+            <span class="car-card-status<?= $status_class ?>"><?= ucfirst($car_status) ?></span>
         </div>
     <?php endforeach; ?>
 <?php endif; ?>

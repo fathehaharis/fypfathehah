@@ -183,8 +183,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_car'])) {
         <select name="status" id="status" required>
             <option value="" disabled <?= !isset($_POST['status']) ? 'selected' : '' ?>>Select...</option>
             <option value="available" <?= (isset($_POST['status']) && $_POST['status']=='available')?'selected':'' ?>>Available</option>
-            <option value="rented" <?= (isset($_POST['status']) && $_POST['status']=='rented')?'selected':'' ?>>Rented</option>
-            <option value="maintenance" <?= (isset($_POST['status']) && $_POST['status']=='maintenance')?'selected':'' ?>>Maintenance</option>
+            <option value="not available" <?= (isset($_POST['status']) && $_POST['status']=='not available')?'selected':'' ?>>Not Available</option>
         </select>
 
         <label for="car_image">Car Image (jpg/jpeg/png)</label>

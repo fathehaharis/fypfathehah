@@ -148,8 +148,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_car'])) {
         <label for="status">Status</label>
         <select name="status" id="status" required>
             <option value="available" <?= $car['status']=='available'?'selected':'' ?>>Available</option>
-            <option value="rented" <?= $car['status']=='rented'?'selected':'' ?>>Rented</option>
-            <option value="maintenance" <?= $car['status']=='maintenance'?'selected':'' ?>>Maintenance</option>
+            <option value="not available" <?= $car['status']=='not available'?'selected':'' ?>>Not Available</option>
         </select>
 
         <button type="submit" name="update_car">Update Car</button>

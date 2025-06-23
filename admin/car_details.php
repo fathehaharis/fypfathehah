@@ -92,8 +92,22 @@ while ($cust_res && $row = $cust_res->fetch_assoc()) {
     $customerNames[$row['cust_id']] = $row['full_name'];
 }
 
-// Get booking history
-$booking_sql = "SELECT * FROM booking WHERE car_id = $car_id ORDER BY return_datetime DESC";
+// --- Booking history pagination ---
+$per_page = 5;
+$page = isset($_GET['page']) && is_numeric($_GET['page']) && $_GET['page'] > 0 ? intval($_GET['page']) : 1;
+$offset = ($page - 1) * $per_page;
+
+// Get total bookings count
+$count_sql = "SELECT COUNT(*) as total FROM booking WHERE car_id = $car_id";
+$count_result = $conn->query($count_sql);
+$total_bookings = 0;
+if ($count_result && $row = $count_result->fetch_assoc()) {
+    $total_bookings = $row['total'];
+}
+$total_pages = ceil($total_bookings / $per_page);
+
+// Fetch bookings for this page
+$booking_sql = "SELECT * FROM booking WHERE car_id = $car_id ORDER BY return_datetime DESC LIMIT $per_page OFFSET $offset";
 $booking_result = $conn->query($booking_sql);
 $bookings = [];
 if ($booking_result) {
@@ -137,13 +151,9 @@ if ($booking_result) {
     background: #e6fcf3;
     color: #2bbf5f;
 }
-.car-details-status.rented {
+.car-details-status.not-available {
     background: #ffeded;
     color: #e54848;
-}
-.car-details-status.maintenance {
-    background: #fff7e6;
-    color: #e7a84b;
 }
 .car-details-actions {
     display: flex;
@@ -303,6 +313,35 @@ if ($booking_result) {
     font-weight: 700;
 }
 .booking-history-table tr:last-child td { border-bottom: none; }
+.booking-pagination {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 7px;
+    margin-top: 9px;
+    margin-bottom: 6px;
+    font-size: 1.02em;
+}
+.booking-pagination a, .booking-pagination span {
+    padding: 5px 13px;
+    border-radius: 7px;
+    text-decoration: none;
+    color: #304cc3;
+    background: #f7fafd;
+    border: 1.2px solid #e1e8f7;
+    font-weight: 600;
+    transition: background 0.14s;
+    margin-left: 2px;
+}
+.booking-pagination a.current, .booking-pagination span.current {
+    background: #304cc3;
+    color: #fff;
+    border-color: #304cc3;
+}
+.booking-pagination a:hover:not(.current) {
+    background: #e6f1fd;
+    color: #183c7c;
+}
 @media (max-width: 700px) {
     .car-details-container { padding: 14px 4vw 18px 4vw;}
     .car-img-gallery img { width: 90px; height: 60px;}
@@ -312,9 +351,13 @@ if ($booking_result) {
 <div class="car-details-container">
     <div class="car-details-title"><?= strtoupper(htmlspecialchars($car['car_brand'])) ?> <?= htmlspecialchars($car['car_model']) ?></div>
     <div class="car-details-plate"><?= htmlspecialchars($car['plate_no']) ?></div>
-    <span class="car-details-status<?= 
-        $car['status']=='rented' ? ' rented' : ($car['status']=='maintenance' ? ' maintenance' : '') ?>">
-        <?= ucfirst($car['status']) ?>
+    <?php
+        // Only show "Available" or "Not Available"
+        $car_status = strtolower($car['status']) == "available" ? "available" : "not available";
+        $status_class = $car_status == "available" ? "" : " not-available";
+    ?>
+    <span class="car-details-status<?= $status_class ?>">
+        <?= ucfirst($car_status) ?>
     </span>
 
     <div class="car-details-actions">
@@ -392,6 +435,8 @@ if ($booking_result) {
     </div>
 
     <div class="car-details-section-title">Booking History</div>
+
+
     <table class="booking-history-table">
         <tr>
             <th>#</th>
@@ -406,7 +451,7 @@ if ($booking_result) {
         <tr><td colspan="7" style="color:#999;">No booking history.</td></tr>
         <?php else: foreach ($bookings as $i => $b): ?>
         <tr>
-            <td><?= $i+1 ?></td>
+            <td><?= $offset + $i + 1 ?></td>
             <td><?= htmlspecialchars($customerNames[$b['cust_id']] ?? $b['cust_id']) ?></td>
             <td><?= htmlspecialchars($b['pickup_datetime']) ?></td>
             <td><?= htmlspecialchars($b['return_datetime']) ?></td>
@@ -416,6 +461,31 @@ if ($booking_result) {
         </tr>
         <?php endforeach; endif; ?>
     </table>
+
+    <?php if ($total_pages > 1): ?>
+    <div class="booking-pagination">
+        <?php if ($page > 1): ?>
+            <a href="?id=<?= $car_id ?>&page=<?= $page-1 ?>">&laquo; Prev</a>
+        <?php endif; ?>
+        <?php
+        // Show max 5 page links around current
+        $start = max(1, $page - 2);
+        $end = min($total_pages, $page + 2);
+        if ($start > 1) echo '<span>...</span>';
+        for ($p = $start; $p <= $end; $p++): ?>
+            <?php if ($p == $page): ?>
+                <span class="current"><?= $p ?></span>
+            <?php else: ?>
+                <a href="?id=<?= $car_id ?>&page=<?= $p ?>"><?= $p ?></a>
+            <?php endif; ?>
+        <?php endfor;
+        if ($end < $total_pages) echo '<span>...</span>';
+        ?>
+        <?php if ($page < $total_pages): ?>
+            <a href="?id=<?= $car_id ?>&page=<?= $page+1 ?>">Next &raquo;</a>
+        <?php endif; ?>
+    </div>
+    <?php endif; ?>
 </div>
 
 <?php include '../includes/footer.php'; ?>
