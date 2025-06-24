@@ -7,9 +7,7 @@ if (!isset($_SESSION['cust_id'])) {
 }
 
 include '../connect.php';
-
-// Include PHPMailer (adjust path if needed)
-require '../vendor/autoload.php'; // Composer autoload
+require '../vendor/autoload.php'; // For PHPMailer
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['booking_id'])) {
     $booking_id = intval($_POST['booking_id']);
@@ -36,7 +34,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['booking_id'])) {
         $total_price = $data['total_price'];
         $status = strtolower($data['status']);
 
-        if ($status == 'pending') {
+        // Only allow cancelling for pending, approved, waiting_verification, or confirmed (if rules allow)
+        if ($status == 'pending' || $status == 'approved' || $status == 'waiting_verification') {
             // Cancel without refund
             $stmt2 = $conn->prepare("UPDATE booking SET status = 'cancelled' WHERE booking_id = ?");
             $stmt2->bind_param("i", $booking_id);
@@ -51,7 +50,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['booking_id'])) {
             exit;
 
         } elseif ($status == 'confirmed') {
-            // Cancel and process refund
+            // Check if pickup is at least 24 hours from now
+            date_default_timezone_set('Asia/Kuala_Lumpur');
+            $now = new DateTime('now', new DateTimeZone('Asia/Kuala_Lumpur'));
+            $pickup_dt = new DateTime($pickup_datetime, new DateTimeZone('Asia/Kuala_Lumpur'));
+            $interval = $now->diff($pickup_dt);
+            $hours_to_pickup = ($pickup_dt > $now) ? ($interval->days * 24 + $interval->h + $interval->i/60) : 0;
+
+            if ($hours_to_pickup <= 24) {
+                $_SESSION['cancel_error'] = "Confirmed bookings cannot be cancelled less than 1 day before pickup.";
+                header("Location: bookings.php");
+                exit;
+            }
+
+            // Cancel and process refund (minus RM100 deposit)
             $conn->begin_transaction();
             try {
                 // 1. Update booking status
@@ -62,9 +74,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['booking_id'])) {
                 }
                 $stmt2->close();
 
-                // 2. Insert refund record
+                // 2. Insert refund record (minus deposit)
+                $refund_amount = max(0, floatval($total_price) - 100);
                 $stmt3 = $conn->prepare("INSERT INTO refunds (booking_id, cust_id, amount, refund_status, created_at) VALUES (?, ?, ?, 'pending', NOW())");
-                $stmt3->bind_param("iid", $booking_id, $cust_id, $total_price);
+                $stmt3->bind_param("iid", $booking_id, $cust_id, $refund_amount);
                 if (!$stmt3->execute()) {
                     throw new Exception("Failed to insert refund record");
                 }
@@ -72,7 +85,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['booking_id'])) {
 
                 $conn->commit();
 
-                sendCancellationEmail($customer_email, $customer_name, $booking_id, $car_model, $pickup_datetime, $return_datetime, true, $total_price);
+                sendCancellationEmail($customer_email, $customer_name, $booking_id, $car_model, $pickup_datetime, $return_datetime, true, $refund_amount);
 
                 $_SESSION['cancel_success'] = "Booking cancelled successfully. Refund will be processed.";
             } catch (Exception $e) {
@@ -83,7 +96,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['booking_id'])) {
             exit;
 
         } else {
-            $_SESSION['cancel_error'] = "You can only cancel pending or confirmed bookings.";
+            $_SESSION['cancel_error'] = "You can only cancel pending, approved, waiting verification, or confirmed bookings (if more than 1 day before pickup).";
             header("Location: bookings.php");
             exit;
         }
@@ -134,7 +147,7 @@ function sendCancellationEmail($to, $username, $booking_id, $car_model, $pickup_
                     <li><b>Return:</b> {$return}</li>
                     <li><b>Refund Amount:</b> RM " . number_format($refundAmount, 2) . "</li>
                 </ul>
-                <p>Your refund will be credited to your account within <b>3 - 5 days</b> after cancellation.</p>
+                <p>Your refund (minus RM100 deposit) will be credited to your account within <b>3 - 5 days</b> after cancellation.</p>
                 <br>
                 <p>Thank you for using TimeLess Car Rental.</p>
                 <p>Best regards,<br>TimeLess Car Rental Team</p>
@@ -144,7 +157,7 @@ function sendCancellationEmail($to, $username, $booking_id, $car_model, $pickup_
                 . "Pickup: {$pickup}\n"
                 . "Return: {$return}\n"
                 . "Refund Amount: RM " . number_format($refundAmount, 2) . "\n\n"
-                . "Your refund will be credited to your account within 3 - 5 days after cancellation.\n\n"
+                . "Your refund (minus RM100 deposit) will be credited to your account within 3 - 5 days after cancellation.\n\n"
                 . "Thank you for using TimeLess Car Rental.\n\nBest regards,\nTimeLess Car Rental Team";
         } else {
             $mail->Body = "
@@ -165,7 +178,7 @@ function sendCancellationEmail($to, $username, $booking_id, $car_model, $pickup_
         }
         $mail->send();
     } catch (Exception $e) {
-        // Optionally: Log or handle the error, e.g. $mail->ErrorInfo;
+        // Optionally log or handle email error
     }
 }
 ?>

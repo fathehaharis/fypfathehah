@@ -397,7 +397,6 @@ document.addEventListener('DOMContentLoaded', function() {
                                         <?php endif; ?>
                                     <?php elseif ($section == 'Completed'): ?>
                                         <a class="action-btn view" href="view_booking.php?booking_id=<?= $b['booking_id'] ?>">View</a>
-                                        <a class="action-btn view" href="download_agreement.php?booking_id=<?= $b['booking_id'] ?>">Agreement</a>
                                     <?php elseif ($section == 'Cancelled'): ?>
                                         <a class="action-btn view" href="view_booking.php?booking_id=<?= $b['booking_id'] ?>">View</a>
                                     <?php endif; ?>

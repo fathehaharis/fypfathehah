@@ -189,6 +189,7 @@ body {
             <th>Status</th>
             <th>Booking Status</th>
             <th>Refund Status</th>
+            <th>Refund Amount</th>
             <th>Method</th>
             <th>Date</th>
             <th>Refund Action</th>
@@ -213,10 +214,11 @@ body {
                     else if ($booking_status == 'completed') $booking_badge = '<span class="booking-status-badge booking-completed">Completed</span>';
                     else if ($booking_status == 'cancelled') $booking_badge = '<span class="booking-status-badge booking-cancelled">Cancelled</span>';
 
-                    // REFUND: get refund row (if any) for this booking
+                    // Refund status, amount, and action
                     $refund_row = null;
                     $refund_status_badge = "-";
                     $refund_action = "-";
+                    $refund_amount_display = "-";
                     if ($booking_status == 'cancelled' && !empty($row['booking_id'])) {
                         $refund_sql = "SELECT * FROM refunds WHERE booking_id = ".intval($row['booking_id'])." ORDER BY refund_id DESC LIMIT 1";
                         $refund_res = $conn->query($refund_sql);
@@ -224,6 +226,7 @@ body {
                             $refund_row = $refund_res->fetch_assoc();
                             $rstatus = $refund_row['refund_status'];
                             $refund_status_badge = '<span class="refund-badge refund-' . htmlspecialchars($rstatus) . '">' . ucfirst($rstatus) . '</span>';
+                            $refund_amount_display = "MYR " . number_format($refund_row['amount'], 2);
                             if ($rstatus === 'pending') {
                                 // Allow admin to process
                                 $refund_action = '<form method="post" action="payments.php" style="margin:0;">
@@ -239,11 +242,13 @@ body {
                             }
                         } else {
                             // No refund yet: create pending refund row
+                            $refund_amount = max(0, floatval($row['amount']) - 100); // refund can't be negative
                             $ins_sql = "INSERT INTO refunds (booking_id, cust_id, amount, refund_status, created_at) 
-                                        VALUES (" . intval($row['booking_id']) . ", " . intval($row['cust_id']) . ", " . floatval($row['amount']) . ", 'pending', NOW())";
+                                        VALUES (" . intval($row['booking_id']) . ", " . intval($row['cust_id']) . ", " . $refund_amount . ", 'pending', NOW())";
                             $conn->query($ins_sql);
                             // After insert, show "Pending"
                             $refund_status_badge = '<span class="refund-badge refund-pending">Pending</span>';
+                            $refund_amount_display = "MYR " . number_format($refund_amount,2);
                             // Get inserted refund_id
                             $new_refund_id = $conn->insert_id;
                             $refund_action = '<form method="post" action="payments.php" style="margin:0;">
@@ -265,13 +270,14 @@ body {
                     <td><?= $badge ?></td>
                     <td><?= $booking_badge ?></td>
                     <td><?= $refund_status_badge ?></td>
+                    <td><?= $refund_amount_display ?></td>
                     <td><?= htmlspecialchars($row['payment_method']) ?></td>
                     <td><?= $row['payment_date'] ?></td>
                     <td><?= $refund_action ?></td>
                 </tr>
             <?php endwhile; ?>
         <?php else: ?>
-            <tr><td colspan="14" style="text-align:center;color:#888;">No payments found.</td></tr>
+            <tr><td colspan="15" style="text-align:center;color:#888;">No payments found.</td></tr>
         <?php endif; ?>
     </tbody>
 </table>
