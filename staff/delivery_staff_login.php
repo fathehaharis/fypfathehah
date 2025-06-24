@@ -152,6 +152,6 @@ document.getElementById('togglePassword').addEventListener('click', function () 
     }
 });
 </script>
-<?php include 'includes/footer.php'; ?>
+<?php include 'C:\xampp\htdocs\fypfathehah\includes\footer.php'; ?>
 </body>
 </html>
