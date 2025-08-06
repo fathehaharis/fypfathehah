@@ -23,7 +23,7 @@ $stmt->close();
 
 // Fetch all available cars
 $sql = "
-        SELECT c.car_id, c.car_brand, c.car_model, c.plate_no, c.daily_rate,
+        SELECT c.car_id, c.car_brand, c.car_model, c.daily_rate,
             COALESCE(main_img.car_image_id, any_img.car_image_id) AS car_image_id
         FROM car c
         LEFT JOIN (
@@ -117,11 +117,6 @@ $result = $conn->query($sql);
     margin-bottom: 4px;
     color: #2f377d;
     text-align: center;
-}
-.car-plate {
-    font-size: 1em;
-    color: #555;
-    margin-bottom: 4px;
 }
 .car-rate {
     font-size: 1em;
@@ -232,7 +227,6 @@ $result = $conn->query($sql);
                      alt="No car image">
             <?php endif; ?>
             <div class="car-title"><?= htmlspecialchars($car['car_brand'] . ' ' . $car['car_model']) ?></div>
-            <div class="car-plate">Plate: <?= htmlspecialchars($car['plate_no']) ?></div>
             <div class="car-rate">RM <?= number_format($car['daily_rate'], 2) ?> / day</div>
             <a class="book-btn" href="book_car.php?car_id=<?= $car['car_id'] ?>">Book Now</a>
         </div>

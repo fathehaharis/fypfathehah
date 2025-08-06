@@ -179,11 +179,13 @@ body { background: #eceef4; }
         <tr><th>Name</th><td><?= htmlspecialchars($driver['full_name']) ?></td></tr>
         <tr><th>Phone</th><td><?= htmlspecialchars($driver['phone_no']) ?></td></tr>
         <tr><th>ID No</th><td><?= htmlspecialchars($driver['id_no']) ?></td></tr>
+        <?php if (!empty($driver['license_no'])): ?>
         <tr><th>License No</th><td><?= htmlspecialchars($driver['license_no']) ?></td></tr>
+        <?php endif; ?>
         <tr><th>Address</th><td><?= htmlspecialchars($driver['address']) ?></td></tr>
         <tr><th>Age</th><td><?= htmlspecialchars($driver['age']) ?></td></tr>
         <tr>
-            <th>License Front Image</th>
+            <th>ID Front Image</th>
             <td>
                 <?php if (!empty($driver['id_front'])): ?>
                     <img src="show_temp_image.php?type=driver_id_front" alt="ID Front" class="img-preview-big">
@@ -193,10 +195,30 @@ body { background: #eceef4; }
             </td>
         </tr>
         <tr>
-            <th>License Back Image</th>
+            <th>ID Back Image</th>
             <td>
                 <?php if (!empty($driver['id_back'])): ?>
                     <img src="show_temp_image.php?type=driver_id_back" alt="ID Back" class="img-preview-big">
+                <?php else: ?>
+                    -
+                <?php endif; ?>
+            </td>
+        </tr>
+        <tr>
+            <th>License Front Image</th>
+            <td>
+                <?php if (!empty($driver['license_front'])): ?>
+                    <img src="show_temp_image.php?type=driver_license_front" alt="License Front" class="img-preview-big">
+                <?php else: ?>
+                    -
+                <?php endif; ?>
+            </td>
+        </tr>
+        <tr>
+            <th>License Back Image</th>
+            <td>
+                <?php if (!empty($driver['license_back'])): ?>
+                    <img src="show_temp_image.php?type=driver_license_back" alt="License Back" class="img-preview-big">
                 <?php else: ?>
                     -
                 <?php endif; ?>

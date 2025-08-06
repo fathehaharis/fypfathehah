@@ -10,8 +10,8 @@ include '../includes/header.php';
 
 $cust_id = $_SESSION['cust_id'];
 
-// Fetch customer details (no license_no, id_no, id_front_image, id_back_image in DDL)
-$stmt = $conn->prepare("SELECT full_name, phone_no, email, username, address, age FROM customer WHERE cust_id = ?");
+// Fetch all customer details except reset_code, reset_code_expire
+$stmt = $conn->prepare("SELECT full_name, phone_no, email, username, id_no, id_front_image, id_back_image, license_front_image, license_back_image, address, age FROM customer WHERE cust_id = ?");
 $stmt->bind_param("i", $cust_id);
 $stmt->execute();
 $result = $stmt->get_result();
@@ -54,7 +54,7 @@ if (!$user) {
 .profile-table th {
     color: #3c4cb8;
     font-weight: 600;
-    width: 140px;
+    width: 160px;
 }
 .profile-edit-btn {
     margin-top: 24px;
@@ -89,6 +89,17 @@ if (!$user) {
     text-align:center;
     transition:background 0.18s, color 0.18s;
 }
+.id-image-preview {
+    max-width: 120px;
+    max-height: 80px;
+    border-radius: 6px;
+    background: #f7fafd;
+    border: 1px solid #e1e1e1;
+}
+.code-note {
+    color: #b0b0b0;
+    font-size: 0.93em;
+}
 </style>
 
 <div class="profile-container">
@@ -98,6 +109,47 @@ if (!$user) {
         <tr><th>Username</th><td><?= htmlspecialchars($user['username']) ?></td></tr>
         <tr><th>Email</th><td><?= htmlspecialchars($user['email']) ?></td></tr>
         <tr><th>Phone No</th><td><?= htmlspecialchars($user['phone_no']) ?></td></tr>
+        <tr><th>ID No</th><td><?= htmlspecialchars($user['id_no']) ?></td></tr>
+        <tr>
+            <th>ID Front Image</th>
+            <td>
+                <?php if (!empty($user['id_front_image'])): ?>
+                    <img class="id-image-preview" src="get_id_image.php?type=front&cust_id=<?= $cust_id ?>" alt="ID Front">
+                <?php else: ?>
+                    <span class="code-note">No image uploaded</span>
+                <?php endif; ?>
+            </td>
+        </tr>
+        <tr>
+            <th>ID Back Image</th>
+            <td>
+                <?php if (!empty($user['id_back_image'])): ?>
+                    <img class="id-image-preview" src="get_id_image.php?type=back&cust_id=<?= $cust_id ?>" alt="ID Back">
+                <?php else: ?>
+                    <span class="code-note">No image uploaded</span>
+                <?php endif; ?>
+            </td>
+        </tr>
+        <tr>
+            <th>License Front Image</th>
+            <td>
+                <?php if (!empty($user['license_front_image'])): ?>
+                    <img class="id-image-preview" src="get_id_image.php?type=license_front&cust_id=<?= $cust_id ?>" alt="License Front">
+                <?php else: ?>
+                    <span class="code-note">No image uploaded</span>
+                <?php endif; ?>
+            </td>
+        </tr>
+        <tr>
+            <th>License Back Image</th>
+            <td>
+                <?php if (!empty($user['license_back_image'])): ?>
+                    <img class="id-image-preview" src="get_id_image.php?type=license_back&cust_id=<?= $cust_id ?>" alt="License Back">
+                <?php else: ?>
+                    <span class="code-note">No image uploaded</span>
+                <?php endif; ?>
+            </td>
+        </tr>
         <tr><th>Address</th><td><?= htmlspecialchars($user['address']) ?></td></tr>
         <tr><th>Age</th><td><?= htmlspecialchars($user['age']) ?></td></tr>
     </table>

@@ -84,7 +84,7 @@ $id_back_blob = isset($driver['id_back']) && !empty($driver['id_back']) && file_
     : null;
 
 $stmt_driver = $conn->prepare("INSERT INTO driver 
-    (cust_id, full_name, phone_no, id_no, license_no, id_front_image, id_back_image, address, age) 
+    (cust_id, full_name, phone_no, id_no, id_front_image, id_back_image, address, age) 
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
 $stmt_driver->bind_param(
     "isssssssi",
@@ -92,7 +92,6 @@ $stmt_driver->bind_param(
     $driver['full_name'],
     $driver['phone_no'],
     $driver['id_no'],
-    $driver['license_no'],
     $id_front_blob,
     $id_back_blob,
     $driver['address'],

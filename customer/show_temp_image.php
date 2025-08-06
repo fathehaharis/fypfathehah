@@ -5,6 +5,8 @@ $type = $_GET['type'] ?? '';
 $allowed_types = [
     'driver_id_front',
     'driver_id_back',
+    'driver_license_front',
+    'driver_license_back',
     'guarantor_id_front',
     'guarantor_id_back'
 ];
@@ -18,6 +20,8 @@ if (!in_array($type, $allowed_types)) {
 $session_map = [
     'driver_id_front' => $_SESSION['driver_data']['id_front'] ?? null,
     'driver_id_back' => $_SESSION['driver_data']['id_back'] ?? null,
+    'driver_license_front' => $_SESSION['driver_data']['license_front'] ?? null,
+    'driver_license_back' => $_SESSION['driver_data']['license_back'] ?? null,
     'guarantor_id_front' => $_SESSION['guarantor_data']['guarantor_id_front'] ?? null,
     'guarantor_id_back' => $_SESSION['guarantor_data']['guarantor_id_back'] ?? null
 ];
