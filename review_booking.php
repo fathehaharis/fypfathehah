@@ -1,275 +1,264 @@
 <?php
 session_start();
-if (!isset($_SESSION['cust_id'])) {
-    header("Location: /index.php");
-    exit;
-}
-
 include '../connect.php';
 
-// Require booking flow prerequisites
-if (empty($_SESSION['booking_data'])) {
-    header("Location: book_car.php");
-    exit;
-}
-
-// Optional: ensure driver step completed
-if (empty($_SESSION['customer_driver_complete'])) {
-    header("Location: booking_driver.php");
-    exit;
-}
-
-$booking = $_SESSION['booking_data'];
-$customer = $_SESSION['customer_data'] ?? [];
+// 1. Ensure all session data is present
+$booking = $_SESSION['booking_data'] ?? [];
+$driver = $_SESSION['driver_data'] ?? [];
 $guarantor = $_SESSION['guarantor_data'] ?? [];
-$cust_id = $_SESSION['cust_id'];
 
-$car_id = $booking['car_id'] ?? null;
-if (!$car_id) {
+if (!$booking || !$driver || !$guarantor) {
     header("Location: book_car.php");
     exit;
 }
 
-// Fetch car info
-$sql = "
-    SELECT c.*, 
-           COALESCE(main_img.car_image_id, any_img.car_image_id) AS car_image_id
-    FROM car c
-    LEFT JOIN (
-        SELECT car_id, MIN(car_image_id) AS car_image_id
-        FROM car_image
-        WHERE image_type = 'main'
-        GROUP BY car_id
-    ) main_img ON c.car_id = main_img.car_id
-    LEFT JOIN (
-        SELECT car_id, MIN(car_image_id) AS car_image_id
-        FROM car_image
-        GROUP BY car_id
-    ) any_img ON c.car_id = any_img.car_id
-    WHERE c.car_id = ?
-";
-$stmt = $conn->prepare($sql);
+// 2. Get car details from DB, including hourly_rate
+$car_id = $booking['car_id'];
+$stmt = $conn->prepare("SELECT car_brand, car_model, daily_rate, hourly_rate FROM car WHERE car_id = ?");
 $stmt->bind_param("i", $car_id);
 $stmt->execute();
 $car = $stmt->get_result()->fetch_assoc();
 $stmt->close();
 
-if (!$car) {
-    echo "<div style='padding:20px;color:#b00020;'>Car not found.</div>";
-    exit;
+// 3. Get customer email from DB (if needed)
+$email = "-";
+if (isset($_SESSION['cust_id'])) {
+    $stmt = $conn->prepare("SELECT email FROM customer WHERE cust_id = ?");
+    $stmt->bind_param("i", $_SESSION['cust_id']);
+    $stmt->execute();
+    $stmt->bind_result($email);
+    $stmt->fetch();
+    $stmt->close();
 }
 
-// Parse dates
-$pickup_datetime = new DateTime($booking['pickup_datetime']);
-$return_datetime = new DateTime($booking['return_datetime']);
-$interval = $pickup_datetime->diff($return_datetime);
-$days = max(1, (int)$interval->format('%a'));
+// 4. Calculate duration and determine mixed daily+hourly
+$pickup = new DateTime($booking['pickup_datetime']);
+$return = new DateTime($booking['return_datetime']);
+$interval = $pickup->diff($return);
+$total_hours = ($interval->days * 24) + $interval->h + ($interval->i > 0 ? 1 : 0);
 
-$delivery_type = $booking['delivery_type'] ?? 'self_pickup';
-$location_delivery = $booking['location_delivery'] ?? '';
-$location_return = $booking['location_return'] ?? '';
+$full_days = floor($total_hours / 24);
+$leftover_hours = $total_hours % 24;
 
-$errors = [];
+$daily_rate = $car['daily_rate'];
+$hourly_rate = $car['hourly_rate'];
 
-// Confirm booking handler
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirm_booking'])) {
-    // Basic validations
-    if ($return_datetime <= $pickup_datetime) {
-        $errors[] = 'Return date/time must be after pickup date/time.';
-    }
+$subtotal = ($full_days * $daily_rate) + ($leftover_hours * $hourly_rate);
 
-    // Check for overlap with existing bookings
-    if (empty($errors)) {
-        $overlap_sql = "
-            SELECT 1
-            FROM booking
-            WHERE car_id = ?
-              AND status IN ('confirmed', 'pending')
-              AND pickup_datetime < ?
-              AND return_datetime > ?
-            LIMIT 1
-        ";
-        $overlap_stmt = $conn->prepare($overlap_sql);
-        $pickup_str = $pickup_datetime->format('Y-m-d H:i:s');
-        $return_str = $return_datetime->format('Y-m-d H:i:s');
-        $overlap_stmt->bind_param("iss", $car_id, $return_str, $pickup_str);
-        $overlap_stmt->execute();
-        $overlap = $overlap_stmt->get_result()->fetch_row();
-        $overlap_stmt->close();
-        if ($overlap) {
-            $errors[] = 'Selected dates overlap with an existing booking. Please go back and choose different dates.';
-        }
-    }
+$booking_duration = $full_days;
+$booking_leftover_hours = $leftover_hours;
+$_SESSION['booking_data']['booking_duration'] = $booking_duration;
+$_SESSION['booking_data']['booking_leftover_hours'] = $booking_leftover_hours;
 
-    if (empty($errors)) {
-        // Insert booking (pending)
-        $insert_sql = "
-            INSERT INTO booking (
-                car_id, cust_id, pickup_datetime, return_datetime,
-                delivery_type, location_delivery, location_return,
-                status, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', NOW())
-        ";
-        $insert_stmt = $conn->prepare($insert_sql);
-        $insert_stmt->bind_param(
-            "iisssss",
-            $car_id,
-            $cust_id,
-            $pickup_str,
-            $return_str,
-            $delivery_type,
-            $location_delivery,
-            $location_return
-        );
-        if ($insert_stmt->execute()) {
-            $new_booking_id = $insert_stmt->insert_id;
-            $insert_stmt->close();
+// 5. Delivery fee and total
+$delivery_type = $booking['delivery_type'];
+$delivery_fee = 0;
+if ($delivery_type === 'delivery') $delivery_fee = 10.00;
+elseif ($delivery_type === 'pickup_and_return') $delivery_fee = 30.00;
 
-            // Optionally clear transient flags but keep data for success page if needed
-            $_SESSION['last_booking_id'] = $new_booking_id;
+// 6. Security deposit
+$security_deposit = 100.00; // RM100 fixed
+$_SESSION['booking_data']['security_deposit'] = $security_deposit;
 
-            header("Location: booking_success.php");
-            exit;
-        } else {
-            $errors[] = 'Failed to create booking. Please try again.';
-        }
-    }
+// 7. Grand total includes security deposit
+$total_price = $subtotal + $delivery_fee + $security_deposit;
+$_SESSION['booking_data']['total_price'] = $total_price;
+
+// 8. Delivery location/notes (from booking_data['notes'])
+$delivery_location = '';
+if (
+    ($delivery_type === 'delivery' || $delivery_type === 'pickup_and_return') 
+    && !empty($booking['notes'])
+) {
+    $delivery_location = $booking['notes'];
 }
-
 include '../includes/header.php';
 ?>
-
 <link rel="stylesheet" href="/assets/css/style.css">
 <style>
-.review-wrap {
-    max-width: 900px;
+body { background: #eceef4; }
+.review-section {
+    max-width: 680px;
     margin: 40px auto;
     background: #fff;
     border-radius: 13px;
     box-shadow: 0 4px 16px rgba(44,60,102,0.09);
-    padding: 24px 28px;
+    padding: 32px 40px 28px 40px;
 }
-.review-title { font-size: 1.28em; font-weight: 700; color: #2f377d; margin: 4px 0 18px 0; }
-.section { margin-bottom: 18px; }
-.section h3 { margin: 0 0 10px 0; font-size: 1.08em; color: #2a2f5a; }
-.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
-.kv { display: grid; grid-template-columns: 170px 1fr; gap: 8px; row-gap: 10px; }
-.label { color: #4a4a4a; font-weight: 600; }
-.value { color: #1e1e1e; }
-.car-img { max-width: 260px; height: 120px; object-fit: contain; background: #f2f5fa; border-radius: 8px; padding: 8px; }
-.divider { height: 1px; background: #e9ecf5; margin: 16px 0; }
-.btn-row { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
-.next-btn { background: #3c4cb8; color: #fff; border: none; padding: 12px 30px; border-radius: 7px; font-size: 1.06em; font-weight: 600; cursor: pointer; }
-.back-btn { background: #ccc; color: #222; border: none; padding: 12px 30px; border-radius: 7px; font-size: 1.06em; font-weight: 600; cursor: pointer; text-decoration: none; display: inline-block; }
-.error-message { background: #ffe0e0; color: #a80000; border: 1px solid #a80000; padding: 10px; margin-bottom: 15px; border-radius: 5px; }
-.small { color: #6a6a6a; font-size: 0.94em; }
-@media (max-width: 800px) { .grid { grid-template-columns: 1fr; } .kv { grid-template-columns: 140px 1fr; } }
+.review-title {
+    font-size: 1.35em;
+    font-weight: 700;
+    color: #2f377d;
+    margin-bottom: 24px;
+}
+.review-table { width:100%; border-collapse:collapse; margin-bottom: 30px; }
+.review-table th, .review-table td { padding: 8px 12px; }
+.review-table th { text-align: left; background: #f0f0f0; width: 180px; }
+.review-table td:last-child { text-align: right; }
+.total { font-size:1.1em; font-weight: bold; color: #203090; }
+.section-label { margin: 18px 0 8px 0; font-weight: 600; color: #444; }
+.img-preview { max-width:120px; max-height:80px; border:1px solid #ccc; border-radius:6px; margin:2px 0; }
+.img-preview-big { max-width:160px; max-height:110px; border:1px solid #bbb; border-radius:7px; margin:2px 0; }
+.btn-row {
+    margin-top: 28px;
+    text-align: right;
+}
+.next-btn {
+    background: #3c4cb8;
+    color: #fff;
+    border: none;
+    padding: 12px 30px;
+    border-radius: 7px;
+    font-size: 1.08em;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.18s;
+    margin-left: 8px;
+}
+.next-btn:hover {background: #234c96;}
+.back-btn {
+    background: #ccc;
+    color: #222;
+    border: none;
+    padding: 12px 30px;
+    border-radius: 7px;
+    font-size: 1.08em;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.18s;
+}
+.back-btn:hover {background: #bbb;}
+@media (max-width: 800px) {
+    .review-section { padding:20px 6vw; }
+    .review-table th { width: 34vw; font-size:0.95em;}
+}
 </style>
 
-<div class="review-wrap">
-    <div class="review-title">Review Your Booking</div>
-
-    <?php if (!empty($errors)): ?>
-        <div class="error-message">
-            <?php foreach ($errors as $err): ?>
-                <div><?= htmlspecialchars($err) ?></div>
-            <?php endforeach; ?>
-        </div>
-    <?php endif; ?>
-
-    <div class="section grid">
-        <div>
-            <h3>Car</h3>
-            <div class="kv">
-                <div class="label">Car</div>
-                <div class="value"><?= htmlspecialchars($car['car_brand'] . ' ' . $car['car_model']) ?></div>
-                <div class="label">Plate No</div>
-                <div class="value"><?= htmlspecialchars($car['plate_no']) ?></div>
-                <div class="label">Daily Rate</div>
-                <div class="value">RM <?= number_format($car['daily_rate'], 2) ?></div>
-                <div class="label">Duration</div>
-                <div class="value"><?= $days ?> day(s)</div>
-                <div class="label">Pickup</div>
-                <div class="value"><?= htmlspecialchars($pickup_datetime->format('Y-m-d H:i')) ?></div>
-                <div class="label">Return</div>
-                <div class="value"><?= htmlspecialchars($return_datetime->format('Y-m-d H:i')) ?></div>
-            </div>
-        </div>
-        <div>
-            <img class="car-img" src="<?= !empty($car['car_image_id']) ? "get_car_image.php?car_image_id=" . $car['car_image_id'] : '/assets/images/viva_elite.png' ?>" alt="Car image" onerror="this.src='/assets/images/viva_elite.png'">
-        </div>
-    </div>
-
-    <div class="divider"></div>
-
-    <div class="section grid">
-        <div>
-            <h3>Service</h3>
-            <div class="kv">
-                <div class="label">Type</div>
-                <div class="value"><?= htmlspecialchars(str_replace('_',' ', $delivery_type)) ?></div>
-                <?php if ($delivery_type === 'delivery' || $delivery_type === 'pickup_and_return'): ?>
-                    <div class="label">Delivery Location</div>
-                    <div class="value"><?= htmlspecialchars($location_delivery ?: '-') ?></div>
+<div class="review-section">
+    <div class="review-title">Review & Confirm Your Booking</div>
+    <div class="section-label">Car & Booking Details</div>
+    <table class="review-table">
+        <tr><th>Car</th><td><?= htmlspecialchars($car['car_brand'].' '.$car['car_model']) ?></td></tr>
+        <tr>
+            <th>Rental Type</th>
+            <td>
+                <?php
+                if ($full_days > 0 && $leftover_hours > 0) echo "Daily + Hourly";
+                elseif ($full_days > 0) echo "Daily";
+                else echo "Hourly";
+                ?>
+            </td>
+        </tr>
+        <?php if ($full_days > 0): ?>
+        <tr><th>Daily Rate</th><td>RM <?= number_format($daily_rate,2) ?></td></tr>
+        <tr><th>Daily Count</th><td><?= $full_days ?> daily(s)</td></tr>
+        <?php endif; ?>
+        <?php if ($leftover_hours > 0): ?>
+        <tr><th>Hourly Rate</th><td>RM <?= number_format($hourly_rate,2) ?></td></tr>
+        <tr><th>Hourly Count</th><td><?= $leftover_hours ?> hour(s)</td></tr>
+        <?php endif; ?>
+        <tr><th>Pickup</th><td><?= htmlspecialchars($booking['pickup_datetime']) ?></td></tr>
+        <tr><th>Return</th><td><?= htmlspecialchars($booking['return_datetime']) ?></td></tr>
+        <tr><th>Delivery Type</th><td><?= htmlspecialchars(ucwords(str_replace('_',' ', $delivery_type))) ?></td></tr>
+        <tr><th>Delivery Fee</th><td>RM <?= number_format($delivery_fee,2) ?></td></tr>
+        <?php if ($delivery_location): ?>
+        <tr><th>Delivery Location</th><td><?= htmlspecialchars($delivery_location) ?></td></tr>
+        <?php endif; ?>
+        <tr><th>Subtotal</th><td>RM <?= number_format($subtotal,2) ?></td></tr>
+        <tr>
+            <th>Security Deposit</th>
+            <td>RM <?= number_format($security_deposit,2) ?></td>
+        </tr>
+        <tr>
+            <th class="total">Total Amount</th>
+            <td class="total">RM <?= number_format($total_price,2) ?></td>
+        </tr>
+    </table>
+    <div class="section-label">Driver (Customer)</div>
+    <table class="review-table">
+        <tr><th>Name</th><td><?= htmlspecialchars($driver['full_name']) ?></td></tr>
+        <tr><th>Phone</th><td><?= htmlspecialchars($driver['phone_no']) ?></td></tr>
+        <tr><th>ID No</th><td><?= htmlspecialchars($driver['id_no']) ?></td></tr>
+        <?php if (!empty($driver['license_no'])): ?>
+        <tr><th>License No</th><td><?= htmlspecialchars($driver['license_no']) ?></td></tr>
+        <?php endif; ?>
+        <tr><th>Address</th><td><?= htmlspecialchars($driver['address']) ?></td></tr>
+        <tr><th>Age</th><td><?= htmlspecialchars($driver['age']) ?></td></tr>
+        <tr>
+            <th>ID Front Image</th>
+            <td>
+                <?php if (!empty($driver['id_front'])): ?>
+                    <img src="show_temp_image.php?type=driver_id_front" alt="ID Front" class="img-preview-big">
+                <?php else: ?>
+                    -
                 <?php endif; ?>
-                <?php if ($delivery_type === 'pickup_and_return'): ?>
-                    <div class="label">Return Pickup Location</div>
-                    <div class="value"><?= htmlspecialchars($location_return ?: '-') ?></div>
+            </td>
+        </tr>
+        <tr>
+            <th>ID Back Image</th>
+            <td>
+                <?php if (!empty($driver['id_back'])): ?>
+                    <img src="show_temp_image.php?type=driver_id_back" alt="ID Back" class="img-preview-big">
+                <?php else: ?>
+                    -
                 <?php endif; ?>
-                <div class="label">Service Fee</div>
-                <div class="value">RM 1.50 per km <span class="small">(final amount to be confirmed by admin)</span></div>
-            </div>
-        </div>
-        <div>
-            <h3>Cost</h3>
-            <div class="kv">
-                <div class="label">Car Rental</div>
-                <div class="value">RM <?= number_format($car['daily_rate'] * $days, 2) ?></div>
-                <div class="label">Service Fee</div>
-                <div class="value">To be confirmed</div>
-                <div class="label">Estimated Total</div>
-                <div class="value">RM <?= number_format($car['daily_rate'] * $days, 2) ?> + service</div>
-            </div>
-        </div>
+            </td>
+        </tr>
+        <tr>
+            <th>License Front Image</th>
+            <td>
+                <?php if (!empty($driver['license_front'])): ?>
+                    <img src="show_temp_image.php?type=driver_license_front" alt="License Front" class="img-preview-big">
+                <?php else: ?>
+                    -
+                <?php endif; ?>
+            </td>
+        </tr>
+        <tr>
+            <th>License Back Image</th>
+            <td>
+                <?php if (!empty($driver['license_back'])): ?>
+                    <img src="show_temp_image.php?type=driver_license_back" alt="License Back" class="img-preview-big">
+                <?php else: ?>
+                    -
+                <?php endif; ?>
+            </td>
+        </tr>
+    </table>
+    <div class="section-label">Guarantor</div>
+    <table class="review-table">
+        <tr><th>Name</th><td><?= htmlspecialchars($guarantor['guarantor_full_name']) ?></td></tr>
+        <tr><th>Phone</th><td><?= htmlspecialchars($guarantor['guarantor_phone_no']) ?></td></tr>
+        <tr><th>ID No</th><td><?= htmlspecialchars($guarantor['guarantor_id_no']) ?></td></tr>
+        <tr><th>Relationship</th><td><?= htmlspecialchars($guarantor['guarantor_relationship']) ?></td></tr>
+        <tr>
+            <th>ID Front Image</th>
+            <td>
+                <?php if (!empty($guarantor['guarantor_id_front'])): ?>
+                    <img src="show_temp_image.php?type=guarantor_id_front" alt="Guarantor ID Front" class="img-preview">
+                <?php else: ?>
+                    -
+                <?php endif; ?>
+            </td>
+        </tr>
+        <tr>
+            <th>ID Back Image</th>
+            <td>
+                <?php if (!empty($guarantor['guarantor_id_back'])): ?>
+                    <img src="show_temp_image.php?type=guarantor_id_back" alt="Guarantor ID Back" class="img-preview">
+                <?php else: ?>
+                    -
+                <?php endif; ?>
+            </td>
+        </tr>
+    </table>
+    <div class="btn-row">
+        <form action="booking_guarantor.php" method="get" style="display:inline;">
+            <button type="submit" class="back-btn">Back</button>
+        </form>
+        <form action="booking_agreement.php" method="post" style="display:inline;">
+            <button type="submit" class="next-btn">Next</button>
+        </form>
     </div>
-
-    <div class="divider"></div>
-
-    <div class="section grid">
-        <div>
-            <h3>Your Details (Driver)</h3>
-            <div class="kv">
-                <div class="label">Full Name</div>
-                <div class="value"><?= htmlspecialchars($customer['full_name'] ?? '') ?></div>
-                <div class="label">Phone</div>
-                <div class="value"><?= htmlspecialchars($customer['phone_no'] ?? '') ?></div>
-                <div class="label">ID No</div>
-                <div class="value"><?= htmlspecialchars($customer['id_no'] ?? '') ?></div>
-                <div class="label">Address</div>
-                <div class="value"><?= htmlspecialchars($customer['address'] ?? '') ?></div>
-                <div class="label">Age</div>
-                <div class="value"><?= htmlspecialchars($customer['age'] ?? '') ?></div>
-            </div>
-        </div>
-        <div>
-            <h3>Guarantor</h3>
-            <div class="kv">
-                <div class="label">Full Name</div>
-                <div class="value"><?= htmlspecialchars($guarantor['guarantor_full_name'] ?? '') ?></div>
-                <div class="label">Phone</div>
-                <div class="value"><?= htmlspecialchars($guarantor['guarantor_phone_no'] ?? '') ?></div>
-                <div class="label">ID No</div>
-                <div class="value"><?= htmlspecialchars($guarantor['guarantor_id_no'] ?? '') ?></div>
-                <div class="label">Relationship</div>
-                <div class="value"><?= htmlspecialchars($guarantor['guarantor_relationship'] ?? '') ?></div>
-            </div>
-        </div>
-    </div>
-
-    <form method="POST" class="btn-row">
-        <a class="back-btn" href="booking_guarantor.php?car_id=<?= htmlspecialchars((string)$car_id) ?>">Back</a>
-        <button type="submit" name="confirm_booking" value="1" class="next-btn">Confirm Booking</button>
-    </form>
 </div>
-
 <?php include '../includes/footer.php'; ?>

@@ -16,6 +16,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['pickup_date']) && iss
     $pickup_datetime = $pickup_date . ' ' . $pickup_time . ':00';
     $return_datetime = $return_date . ' ' . $return_time . ':00';
 
+    // Compute notes for review page compatibility (delivery/return locations)
+    $delivery_type_post = $_POST['delivery_type'] ?? '';
+    $notes = '';
+    if ($delivery_type_post === 'delivery' || $delivery_type_post === 'pickup_and_return') {
+        $delivery_loc = trim($_POST['location_delivery'] ?? '');
+        $return_loc = trim($_POST['location_return'] ?? '');
+        if ($delivery_loc !== '') {
+            $notes = $delivery_loc;
+        }
+        if ($delivery_type_post === 'pickup_and_return' && $return_loc !== '') {
+            $notes .= ($notes !== '' ? ' | ' : '') . 'Return: ' . $return_loc;
+        }
+    }
+
     $_SESSION['booking_data'] = [
         'car_id'            => $_POST['car_id'] ?? '',
         'pickup_datetime'   => $pickup_datetime,
@@ -23,6 +37,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['pickup_date']) && iss
         'delivery_type'     => $_POST['delivery_type'] ?? '',
         'location_delivery' => $_POST['location_delivery'] ?? '',
         'location_return'   => $_POST['location_return'] ?? '',
+        'notes'             => $notes,
     ];
 }
 
@@ -131,6 +146,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['customer_full_name'])
 
     // Mark as "driver complete"
     if (empty($errors)) {
+        // Mirror data into driver_data for downstream pages
+        $_SESSION['driver_data'] = [
+            'full_name'     => $_SESSION['customer_data']['full_name'] ?? '',
+            'phone_no'      => $_SESSION['customer_data']['phone_no'] ?? '',
+            'id_no'         => $_SESSION['customer_data']['id_no'] ?? '',
+            'license_no'    => $_SESSION['customer_data']['license_no'] ?? '',
+            'address'       => $_SESSION['customer_data']['address'] ?? '',
+            'age'           => $_SESSION['customer_data']['age'] ?? '',
+            'id_front'      => $_SESSION['customer_data']['id_front'] ?? '',
+            'id_back'       => $_SESSION['customer_data']['id_back'] ?? '',
+            'license_front' => $_SESSION['customer_data']['license_front'] ?? '',
+            'license_back'  => $_SESSION['customer_data']['license_back'] ?? '',
+        ];
+
         $_SESSION['customer_driver_complete'] = true;
         header("Location: booking_guarantor.php");
         exit;
