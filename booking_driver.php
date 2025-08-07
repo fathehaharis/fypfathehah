@@ -369,7 +369,7 @@ document.addEventListener('DOMContentLoaded', function() {
 </script>
 
 <div class="form-section">
-    <div class="form-title">Your Details (Driver)</div>
+    <div class="form-title">Your Details (Customer)</div>
     <?php if (!empty($errors)): ?>
         <div class="error-message">
             <?php foreach ($errors as $error): ?>

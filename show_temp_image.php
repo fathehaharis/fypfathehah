@@ -7,17 +7,17 @@ $type = $_GET['type'] ?? '';
 $path = '';
 
 switch ($type) {
-    case 'driver_id_front':
-        $path = $_SESSION['driver_data']['id_front'] ?? '';
+    case 'customer_id_front':
+        $path = $_SESSION['customer_data']['id_front'] ?? '';
         break;
-    case 'driver_id_back':
-        $path = $_SESSION['driver_data']['id_back'] ?? '';
+    case 'customer_id_back':
+        $path = $_SESSION['customer_data']['id_back'] ?? '';
         break;
-    case 'driver_license_front':
-        $path = $_SESSION['driver_data']['license_front'] ?? '';
+    case 'customer_license_front':
+        $path = $_SESSION['customer_data']['license_front'] ?? '';
         break;
-    case 'driver_license_back':
-        $path = $_SESSION['driver_data']['license_back'] ?? '';
+    case 'customer_license_back':
+        $path = $_SESSION['customer_data']['license_back'] ?? '';
         break;
     case 'guarantor_id_front':
         $path = $_SESSION['guarantor_data']['guarantor_id_front'] ?? '';

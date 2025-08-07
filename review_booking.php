@@ -4,10 +4,10 @@ include '../connect.php';
 
 // 1. Ensure all session data is present
 $booking = $_SESSION['booking_data'] ?? [];
-$driver = $_SESSION['driver_data'] ?? [];
+$customer = $_SESSION['customer_data'] ?? [];
 $guarantor = $_SESSION['guarantor_data'] ?? [];
 
-if (!$booking || !$driver || !$guarantor) {
+if (!$booking || !$customer || !$guarantor) {
     header("Location: book_car.php");
     exit;
 }
@@ -174,21 +174,21 @@ body { background: #eceef4; }
             <td class="total">RM <?= number_format($total_price,2) ?></td>
         </tr>
     </table>
-    <div class="section-label">Driver (Customer)</div>
+    <div class="section-label">Customer</div>
     <table class="review-table">
-        <tr><th>Name</th><td><?= htmlspecialchars($driver['full_name']) ?></td></tr>
-        <tr><th>Phone</th><td><?= htmlspecialchars($driver['phone_no']) ?></td></tr>
-        <tr><th>ID No</th><td><?= htmlspecialchars($driver['id_no']) ?></td></tr>
-        <?php if (!empty($driver['license_no'])): ?>
-        <tr><th>License No</th><td><?= htmlspecialchars($driver['license_no']) ?></td></tr>
+        <tr><th>Name</th><td><?= htmlspecialchars($customer['full_name']) ?></td></tr>
+        <tr><th>Phone</th><td><?= htmlspecialchars($customer['phone_no']) ?></td></tr>
+        <tr><th>ID No</th><td><?= htmlspecialchars($customer['id_no']) ?></td></tr>
+        <?php if (!empty($customer['license_no'])): ?>
+        <tr><th>License No</th><td><?= htmlspecialchars($customer['license_no']) ?></td></tr>
         <?php endif; ?>
-        <tr><th>Address</th><td><?= htmlspecialchars($driver['address']) ?></td></tr>
-        <tr><th>Age</th><td><?= htmlspecialchars($driver['age']) ?></td></tr>
+        <tr><th>Address</th><td><?= htmlspecialchars($customer['address']) ?></td></tr>
+        <tr><th>Age</th><td><?= htmlspecialchars($customer['age']) ?></td></tr>
         <tr>
             <th>ID Front Image</th>
             <td>
-                <?php if (!empty($driver['id_front'])): ?>
-                    <img src="show_temp_image.php?type=driver_id_front" alt="ID Front" class="img-preview-big">
+                <?php if (!empty($customer['id_front'])): ?>
+                    <img src="show_temp_image.php?type=customer_id_front" alt="ID Front" class="img-preview-big">
                 <?php else: ?>
                     -
                 <?php endif; ?>
@@ -197,8 +197,8 @@ body { background: #eceef4; }
         <tr>
             <th>ID Back Image</th>
             <td>
-                <?php if (!empty($driver['id_back'])): ?>
-                    <img src="show_temp_image.php?type=driver_id_back" alt="ID Back" class="img-preview-big">
+                <?php if (!empty($customer['id_back'])): ?>
+                    <img src="show_temp_image.php?type=customer_id_back" alt="ID Back" class="img-preview-big">
                 <?php else: ?>
                     -
                 <?php endif; ?>
@@ -207,8 +207,8 @@ body { background: #eceef4; }
         <tr>
             <th>License Front Image</th>
             <td>
-                <?php if (!empty($driver['license_front'])): ?>
-                    <img src="show_temp_image.php?type=driver_license_front" alt="License Front" class="img-preview-big">
+                <?php if (!empty($customer['license_front'])): ?>
+                    <img src="show_temp_image.php?type=customer_license_front" alt="License Front" class="img-preview-big">
                 <?php else: ?>
                     -
                 <?php endif; ?>
@@ -217,8 +217,8 @@ body { background: #eceef4; }
         <tr>
             <th>License Back Image</th>
             <td>
-                <?php if (!empty($driver['license_back'])): ?>
-                    <img src="show_temp_image.php?type=driver_license_back" alt="License Back" class="img-preview-big">
+                <?php if (!empty($customer['license_back'])): ?>
+                    <img src="show_temp_image.php?type=customer_license_back" alt="License Back" class="img-preview-big">
                 <?php else: ?>
                     -
                 <?php endif; ?>
