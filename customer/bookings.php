@@ -5,23 +5,21 @@ if (!isset($_SESSION['cust_id'])) {
     exit;
 }
 
-include '../connect.php';
 date_default_timezone_set('Asia/Kuala_Lumpur');
+include '../connect.php';
 
-$cust_id = $_SESSION['cust_id'];
+$cust_id = (int)$_SESSION['cust_id'];
 
-// Status mapping for display sections (add any new statuses here)
 $status_map = [
     'pending'              => 'Pending',
     'waiting_verification' => 'Pending',
-    'approved'             => 'Pending',   // Only show "Pay" if approved
+    'approved'             => 'Pending',
     'confirmed'            => 'Upcoming',
     'completed'            => 'Completed',
     'cancelled'            => 'Cancelled',
     'rejected'             => 'Cancelled'
 ];
 
-// Prepare empty arrays for each section
 $bookings = [
     'Pending'   => [],
     'Upcoming'  => [],
@@ -29,14 +27,25 @@ $bookings = [
     'Cancelled' => []
 ];
 
-// Fetch bookings for this customer with 1 car image if any
 $stmt = $conn->prepare("
     SELECT 
-        b.*,
+        b.booking_id,
+        b.cust_id,
+        b.car_id,
+        b.pickup_datetime,
+        b.return_datetime,
+        b.day_count,
+        b.daily_rate,
+        b.total_price,
+        b.security_deposit,
+        b.status,
         c.car_brand,
         c.car_model,
         c.plate_no,
-        ci.image_path AS car_image
+        ci.image_path AS car_image,
+        ds.delivery_service_type,
+        ds.delivery_service_status,
+        ds.delivery_service_fee
     FROM booking b
     JOIN car c ON b.car_id = c.car_id
     LEFT JOIN (
@@ -46,6 +55,15 @@ $stmt = $conn->prepare("
             SELECT MIN(car_image_id) FROM car_image GROUP BY car_id
         )
     ) ci ON c.car_id = ci.car_id
+    LEFT JOIN (
+        SELECT 
+            booking_id,
+            MAX(CASE WHEN service_type IN ('delivery','pickup_and_return') THEN service_type END) AS delivery_service_type,
+            MAX(CASE WHEN service_type IN ('delivery','pickup_and_return') THEN status END) AS delivery_service_status,
+            MAX(CASE WHEN service_type IN ('delivery','pickup_and_return') THEN fee END) AS delivery_service_fee
+        FROM service
+        GROUP BY booking_id
+    ) ds ON ds.booking_id = b.booking_id
     WHERE b.cust_id = ?
     ORDER BY b.pickup_datetime DESC
 ");
@@ -54,245 +72,115 @@ $stmt->execute();
 $result = $stmt->get_result();
 
 while ($row = $result->fetch_assoc()) {
-    $db_status = strtolower($row['status']);
-    $section = isset($status_map[$db_status]) ? $status_map[$db_status] : 'Upcoming';
+    $raw_status = strtolower(trim($row['status']));
+    $section = $status_map[$raw_status] ?? 'Upcoming';
     $bookings[$section][] = $row;
 }
 $stmt->close();
+
+/* Helpers */
+function computeDayCount(array $b): int {
+    if (!empty($b['day_count']) && (int)$b['day_count'] > 0) return (int)$b['day_count'];
+    try {
+        $p = new DateTime($b['pickup_datetime']);
+        $r = new DateTime($b['return_datetime']);
+        return max(1, (int)$p->diff($r)->days);
+    } catch (Throwable $e) {
+        return 1;
+    }
+}
+
+function canCancel(array $b): bool {
+    $now = new DateTime('now', new DateTimeZone('Asia/Kuala_Lumpur'));
+    try { $pickup = new DateTime($b['pickup_datetime'], new DateTimeZone('Asia/Kuala_Lumpur')); }
+    catch (Throwable $e) { return false; }
+    if ($pickup <= $now) return false;
+    $interval = $now->diff($pickup);
+    $hours_to_pickup = ($interval->days * 24) + $interval->h + ($interval->i / 60);
+    return $hours_to_pickup > 24;
+}
+
 include '../includes/header.php';
 ?>
 <link rel="stylesheet" href="/assets/css/style.css">
 <style>
-.bookings-main-layout {
-    display: flex;
-    gap: 36px;
-    max-width: 1200px;
-    margin: 44px auto 60px auto;
+.bookings-main-layout { display:flex; gap:36px; max-width:1200px; margin:44px auto 60px; }
+.bookings-sidebar { width:210px; min-width:180px; background:#f7faff; border-radius:13px; box-shadow:0 4px 18px rgba(44,60,102,0.07); padding:32px 0; }
+.bookings-sidebar ul { list-style:none; margin:0; padding:0; }
+.bookings-sidebar-btn { display:block; padding:14px 26px; border:none; background:none; width:100%; text-align:left; font-size:1.04em; font-weight:600; color:#3c4cb8; border-radius:0 22px 22px 0; transition:.15s; cursor:pointer; border-left:4px solid transparent; }
+.bookings-sidebar-btn.active, .bookings-sidebar-btn:hover { background:#e7edfa; color:#234c96; border-left:4px solid #3c4cb8; }
+.bookings-content { flex:1; background:#fff; padding:36px 44px; border-radius:13px; box-shadow:0 4px 18px rgba(44,60,102,0.09); }
+.bookings-title { font-size:1.4em; font-weight:700; color:#2f377d; margin-bottom:26px; text-align:center; }
+.booking-table { width:100%; border-collapse:collapse; }
+.booking-table th, .booking-table td { border-bottom:1px solid #f0f1f4; padding:9px 8px 9px 0; text-align:left; font-size:1.01em; vertical-align:middle; }
+.booking-table th.delivery-col, .booking-table td.delivery-col { width:120px; }
+.booking-status { padding:4px 12px; border-radius:8px; font-weight:600; font-size:.98em; display:inline-block; }
+.status-pending { background:#fffbe7; color:#bfa800; }
+.status-upcoming { background:#f7faff; color:#2f377d; }
+.status-completed { background:#e3fbe6; color:#219150; }
+.status-cancelled { background:#fde9e9; color:#d42d2d; }
+.booking-car-img-thumb { width:88px; height:56px; object-fit:cover; border-radius:7px; border:1px solid #dadada; background:#f2f3f8; margin-right:7px; vertical-align:middle; }
+.action-btn { background:#3c4cb8; color:#fff; border:none; border-radius:7px; padding:7px 16px; font-size:1em; font-weight:500; text-decoration:none; cursor:pointer; transition:.17s; display:inline-block; }
+.action-btn.cancel { background:#d42d2d; }
+.action-btn.cancel:hover { background:#b82323; }
+.action-btn.view:hover { background:#234c96; }
+.badge-delivery { display:inline-block; margin-left:6px; background:#ffedc2; color:#9b6200; padding:3px 8px; font-size:.65em; font-weight:700; border-radius:12px; letter-spacing:.5px; text-transform:uppercase; }
+.delivery-fee-pending { font-size:.78em; font-weight:600; color:#b36a08; background:#fff3d9; padding:3px 8px; border-radius:8px; display:inline-block; }
+.delivery-fee-free { font-size:.70em; font-weight:700; color:#1d7a43; background:#e3fbe6; padding:4px 10px; border-radius:20px; display:inline-block; letter-spacing:.4px; }
+.delivery-fee-dash { color:#999; font-size:.9em; }
+.fee-tooltip-wrap { position:relative; display:inline-block; }
+.fee-info-icon {
+    display:inline-block; width:16px; height:16px; line-height:16px;
+    text-align:center; font-size:11px; font-weight:700;
+    border-radius:50%; background:#3c4cb8; color:#fff;
+    margin-left:4px; cursor:help;
 }
-.bookings-sidebar {
-    width: 210px;
-    min-width: 180px;
-    background: #f7faff;
-    border-radius: 13px;
-    box-shadow: 0 4px 18px rgba(44,60,102,0.07);
-    padding: 32px 0 32px 0;
-    height: fit-content;
+.fee-tooltip-wrap .fee-tooltip {
+    visibility:hidden; opacity:0;
+    position:absolute; z-index:10; top:22px; left:0;
+    background:#1f2740; color:#fff; padding:8px 10px;
+    border-radius:8px; font-size:.72em; width:210px;
+    transition:.15s;
+    box-shadow:0 4px 12px rgba(10,20,45,.25);
 }
-.bookings-sidebar ul {
-    list-style: none;
-    margin: 0;
-    padding: 0;
+.fee-tooltip-wrap:hover .fee-tooltip {
+    visibility:visible; opacity:1;
 }
-.bookings-sidebar li {
-    margin: 0;
-    padding: 0;
-}
-.bookings-sidebar-btn {
-    display: block;
-    padding: 14px 26px;
-    margin: 0;
-    border: none;
-    background: none;
-    width: 100%;
-    text-align: left;
-    font-size: 1.04em;
-    font-weight: 600;
-    color: #3c4cb8;
-    border-radius: 0 22px 22px 0;
-    transition: background 0.15s, color 0.15s;
-    cursor: pointer;
-    outline: none;
-    border-left: 4px solid transparent;
-}
-.bookings-sidebar-btn.active,
-.bookings-sidebar-btn:hover {
-    background: #e7edfa;
-    color: #234c96;
-    border-left: 4px solid #3c4cb8;
-}
-.bookings-content {
-    flex: 1;
-    background: #fff;
-    padding: 36px 44px 36px 44px;
-    border-radius: 13px;
-    box-shadow: 0 4px 18px rgba(44,60,102,0.09);
-    min-width: 0;
-}
-.bookings-title {
-    font-size: 1.4em;
-    font-weight: 700;
-    color: #2f377d;
-    margin-bottom: 26px;
-    text-align: center;
-}
-.bookings-section-title {
-    font-size: 1.15em;
-    color: #3c4cb8;
-    font-weight: 600;
-    margin: 32px 0 12px 0;
-    border-bottom: 1px solid #dbe0f0;
-    padding-bottom: 2px;
-}
-.booking-table {
-    width: 100%;
-    border-collapse: collapse;
-    margin-bottom: 8px;
-}
-.booking-table th, .booking-table td {
-    border-bottom: 1px solid #f0f1f4;
-    padding: 9px 8px 9px 0;
-    text-align: left;
-    font-size: 1.01em;
-}
-.booking-table th {
-    color: #3c4cb8;
-    font-weight: 600;
-}
-.booking-table tr:last-child td {
-    border-bottom: none;
-}
-.booking-status {
-    padding: 4px 12px;
-    border-radius: 8px;
-    font-weight: 600;
-    font-size: 0.98em;
-    display: inline-block;
-}
-.status-pending { background: #fffbe7; color: #bfa800; }
-.status-upcoming { background: #f7faff; color: #2f377d; }
-.status-completed { background: #e3fbe6; color: #219150; }
-.status-cancelled { background: #fde9e9; color: #d42d2d; }
-.no-bookings {
-    color: #868fba;
-    text-align: center;
-    margin: 16px 0 32px 0;
-}
-.booking-actions {
-    display: flex;
-    gap: 10px;
-}
-.action-btn {
-    background: #3c4cb8;
-    color: #fff;
-    border: none;
-    border-radius: 7px;
-    padding: 7px 16px;
-    font-size: 1em;
-    font-weight: 500;
-    text-decoration: none;
-    cursor: pointer;
-    transition: background 0.17s;
-    display: inline-block;
-}
-.action-btn.cancel {
-    background: #d42d2d;
-}
-.action-btn.cancel:hover {
-    background: #b82323;
-}
-.action-btn.view:hover {
-    background: #234c96;
-}
-.booking-car-img-thumb {
-    width: 88px;
-    height: 56px;
-    object-fit: cover;
-    border-radius: 7px;
-    border: 1px solid #dadada;
-    background: #f2f3f8;
-    margin-right: 7px;
-    vertical-align: middle;
-}
-.back-btn {
-    width: 180px;
-    margin: 22px auto 0 auto;
-    display: block;
-    background: #c2c7d6;
-    color: #2f377d;
-    border: none;
-    padding: 13px 0;
-    border-radius: 8px;
-    font-size: 1.08em;
-    font-weight: 600;
-    cursor: pointer;
-    text-align: center;
-    text-decoration: none;
-    transition: background 0.18s, color 0.18s;
-}
-.back-btn:hover {
-    background: #b4bac9;
-    color: #162040;
-}
-@media (max-width: 900px) {
-    .bookings-main-layout {
-        flex-direction: column;
-        gap: 0;
-    }
-    .bookings-sidebar {
-        width: 100%;
-        border-radius: 13px 13px 0 0;
-        display: flex;
-        flex-direction: row;
-        justify-content: space-around;
-        padding: 0;
-    }
-    .bookings-sidebar ul {
-        display: flex;
-        width: 100%;
-    }
-    .bookings-sidebar li {
-        flex: 1;
-    }
-    .bookings-sidebar-btn {
-        border-radius: 0;
-        border-left: none;
-        border-bottom: 4px solid transparent;
-        text-align: center;
-        padding: 14px 0;
-        font-size: 1em;
-    }
-    .bookings-sidebar-btn.active,
-    .bookings-sidebar-btn:hover {
-        border-left: none;
-        border-bottom: 4px solid #3c4cb8;
-        background: #e7edfa;
-    }
-    .bookings-content {
-        padding: 22px 4vw 22px 4vw;
-    }
+.back-btn { width:180px; margin:22px auto 0; display:block; background:#c2c7d6; color:#2f377d; border:none; padding:13px 0; border-radius:8px; font-size:1.08em; font-weight:600; cursor:pointer; text-align:center; text-decoration:none; transition:.18s; }
+.back-btn:hover { background:#b4bac9; color:#162040; }
+@media (max-width:900px){
+  .bookings-main-layout { flex-direction:column; gap:0; }
+  .bookings-sidebar { width:100%; border-radius:13px 13px 0 0; display:flex; justify-content:space-around; padding:0; }
+  .bookings-sidebar ul { display:flex; width:100%; }
+  .bookings-sidebar-btn { border-radius:0; border-left:none; border-bottom:4px solid transparent; text-align:center; padding:14px 0; font-size:1em; }
+  .bookings-sidebar-btn.active, .bookings-sidebar-btn:hover { border-bottom:4px solid #3c4cb8; background:#e7edfa; }
+  .bookings-content { padding:22px 4vw; }
+  .booking-table th.delivery-col, .booking-table td.delivery-col { width:auto; }
 }
 </style>
 <script>
-function showSection(section) {
-    document.querySelectorAll('.bookings-content-section').forEach(function(div) {
-        div.style.display = 'none';
-    });
-    document.getElementById('section-' + section).style.display = '';
-    document.querySelectorAll('.bookings-sidebar-btn').forEach(function(btn) {
-        btn.classList.remove('active');
-    });
-    document.getElementById('sidebar-btn-' + section).classList.add('active');
+function showSection(section){
+    document.querySelectorAll('.bookings-content-section').forEach(div=>div.style.display='none');
+    const el=document.getElementById('section-'+section);
+    if(el) el.style.display='';
+    document.querySelectorAll('.bookings-sidebar-btn').forEach(btn=>btn.classList.remove('active'));
+    const btn=document.getElementById('sidebar-btn-'+section);
+    if(btn) btn.classList.add('active');
 }
-
-document.addEventListener('DOMContentLoaded', function() {
-    // Default: show Pending if any, else Upcoming
-    let defaultSection = 'Pending';
-    <?php if (!empty($bookings['Pending'])): ?>
-        defaultSection = 'Pending';
-    <?php elseif (!empty($bookings['Upcoming'])): ?>
-        defaultSection = 'Upcoming';
-    <?php elseif (!empty($bookings['Completed'])): ?>
-        defaultSection = 'Completed';
-    <?php else: ?>
-        defaultSection = 'Cancelled';
+document.addEventListener('DOMContentLoaded',()=>{
+    let defaultSection='Pending';
+    <?php if (empty($bookings['Pending']) && !empty($bookings['Upcoming'])): ?>
+        defaultSection='Upcoming';
+    <?php elseif (empty($bookings['Pending']) && empty($bookings['Upcoming']) && !empty($bookings['Completed'])): ?>
+        defaultSection='Completed';
+    <?php elseif (empty($bookings['Pending']) && empty($bookings['Upcoming']) && empty($bookings['Completed'])): ?>
+        defaultSection='Cancelled';
     <?php endif; ?>
     showSection(defaultSection);
-
-    // Sidebar click events
-    document.getElementById('sidebar-btn-Pending').onclick = function() { showSection('Pending'); };
-    document.getElementById('sidebar-btn-Upcoming').onclick = function() { showSection('Upcoming'); };
-    document.getElementById('sidebar-btn-Completed').onclick = function() { showSection('Completed'); };
-    document.getElementById('sidebar-btn-Cancelled').onclick = function() { showSection('Cancelled'); };
+    ['Pending','Upcoming','Completed','Cancelled'].forEach(s=>{
+        const b=document.getElementById('sidebar-btn-'+s);
+        if(b) b.onclick=()=>showSection(s);
+    });
 });
 </script>
 
@@ -307,9 +195,10 @@ document.addEventListener('DOMContentLoaded', function() {
     </nav>
     <div class="bookings-content">
         <div class="bookings-title">My Bookings</div>
-        <?php foreach (['Pending', 'Upcoming', 'Completed', 'Cancelled'] as $section): ?>
+
+        <?php foreach (['Pending','Upcoming','Completed','Cancelled'] as $section): ?>
             <div id="section-<?= $section ?>" class="bookings-content-section" style="display:none;">
-                <div class="bookings-section-title"><?= $section ?> Bookings</div>
+                <h3 class="bookings-section-title"><?= $section ?> Bookings</h3>
                 <?php if (empty($bookings[$section])): ?>
                     <div class="no-bookings">No <?= strtolower($section) ?> bookings found.</div>
                 <?php else: ?>
@@ -320,18 +209,56 @@ document.addEventListener('DOMContentLoaded', function() {
                             <th>Pickup Date</th>
                             <th>Return Date</th>
                             <th>Duration</th>
+                            <th class="delivery-col">Delivery Fee (RM)</th>
                             <th>Total (RM)</th>
                             <th>Status</th>
                             <th>Actions</th>
                         </tr>
                         <?php foreach ($bookings[$section] as $b): ?>
                             <?php
-                                // Calculate if pickup is at least 24 hours from now
-                                $now = new DateTime('now', new DateTimeZone('Asia/Kuala_Lumpur'));
-                                $pickup_dt = new DateTime($b['pickup_datetime'], new DateTimeZone('Asia/Kuala_Lumpur'));
-                                $interval = $now->diff($pickup_dt);
-                                $hours_to_pickup = ($pickup_dt > $now) ? ($interval->days * 24 + $interval->h + $interval->i/60) : 0;
-                                $can_cancel = $hours_to_pickup > 24;
+                                $duration_days = computeDayCount($b);
+                                $raw_status    = strtolower($b['status']);
+                                $status_class  = match($section) {
+                                    'Pending'   => 'status-pending',
+                                    'Completed' => 'status-completed',
+                                    'Cancelled' => 'status-cancelled',
+                                    default     => 'status-upcoming'
+                                };
+                                $is_cancellable = ($section === 'Pending' || $section === 'Upcoming') && canCancel($b);
+
+                                $has_delivery          = !empty($b['delivery_service_type']);
+                                $delivery_fee          = $b['delivery_service_fee'];
+                                $delivery_fee_is_set   = $has_delivery && $delivery_fee !== null;
+
+                                // Badge only while fee pending
+                                $show_delivery_badge   = $has_delivery && !$delivery_fee_is_set;
+
+                                $base_total = ($duration_days * (float)$b['daily_rate']) + (float)$b['security_deposit'];
+
+                                if ($has_delivery) {
+                                    if ($delivery_fee_is_set) {
+                                        $fee_included_in_total = (abs((float)$b['total_price'] - ($base_total + (float)$delivery_fee)) < 0.01);
+                                    } else {
+                                        $fee_included_in_total = false;
+                                    }
+                                } else {
+                                    $fee_included_in_total = (abs((float)$b['total_price'] - $base_total) < 0.01);
+                                }
+
+                                $can_pay = (
+                                    $section === 'Pending' &&
+                                    $raw_status === 'approved' &&
+                                    $fee_included_in_total
+                                );
+
+                                $pay_blocker_reason = '';
+                                if ($section === 'Pending' && $raw_status === 'approved' && !$can_pay) {
+                                    if ($has_delivery && !$delivery_fee_is_set) {
+                                        $pay_blocker_reason = 'Waiting delivery fee';
+                                    } elseif (!$fee_included_in_total) {
+                                        $pay_blocker_reason = 'Updating total...';
+                                    }
+                                }
                             ?>
                             <tr>
                                 <td>
@@ -340,65 +267,61 @@ document.addEventListener('DOMContentLoaded', function() {
                                     <?php else: ?>
                                         <img class="booking-car-img-thumb" src="/assets/images/no-car.png" alt="No Car Image">
                                     <?php endif; ?>
-                                    <?= htmlspecialchars($b['car_brand'] . ' ' . $b['car_model']) ?>
+                                    <?= htmlspecialchars($b['car_brand'].' '.$b['car_model']) ?>
+                                    <?php if ($show_delivery_badge): ?>
+                                        <span class="badge-delivery" title="Delivery / pickup service selected, fee pending.">Delivery Service</span>
+                                    <?php endif; ?>
                                 </td>
                                 <td><?= htmlspecialchars($b['plate_no']) ?></td>
-                                <td><?= date('d M Y, H:i', strtotime($b['pickup_datetime'])) ?></td>
-                                <td><?= date('d M Y, H:i', strtotime($b['return_datetime'])) ?></td>
-                                <td>
-                                    <?php
-                                        $duration_str = '';
-                                        if ((int)$b['day_count'] > 0) $duration_str .= (int)$b['day_count'] . ' day(s)';
-                                        if ((int)$b['hour_count'] > 0) {
-                                            if ($duration_str) $duration_str .= ' ';
-                                            $duration_str .= (int)$b['hour_count'] . ' hour(s)';
-                                        }
-                                        if (!$duration_str) $duration_str = htmlspecialchars($b['booking_duration'] ?? '-');
-                                        echo $duration_str;
-                                    ?>
+                                <td><?= htmlspecialchars(date('d M Y, H:i', strtotime($b['pickup_datetime']))) ?></td>
+                                <td><?= htmlspecialchars(date('d M Y, H:i', strtotime($b['return_datetime']))) ?></td>
+                                <td><?= $duration_days ?> day(s)</td>
+
+                                <td class="delivery-col">
+                                    <?php if (!$has_delivery): ?>
+                                        <span class="delivery-fee-dash">-</span>
+                                    <?php elseif ($has_delivery && !$delivery_fee_is_set): ?>
+                                        <span class="delivery-fee-pending" title="Admin has not set the delivery fee yet.">Pending</span>
+                                    <?php else: ?>
+                                        <?php if ((float)$delivery_fee === 0.0): ?>
+                                            <span class="delivery-fee-free" title="Delivery / pickup service is free.">Free</span>
+                                        <?php else: ?>
+                                            <span class="fee-tooltip-wrap" title="Delivery / pickup service fee applied.">
+                                                <?= number_format((float)$delivery_fee, 2) ?>
+                                                <span class="fee-info-icon">i</span>
+                                                <span class="fee-tooltip">
+                                                    Delivery service fee has been added.<br>
+                                                    Total now includes base + deposit + delivery fee.
+                                                </span>
+                                            </span>
+                                        <?php endif; ?>
+                                    <?php endif; ?>
                                 </td>
-                                <td><?= number_format($b['total_price'], 2) ?></td>
-                                <td>
-                                    <?php
-                                        $status_class = 'status-upcoming';
-                                        if ($section == 'Pending') $status_class = 'status-pending';
-                                        else if ($section == 'Completed') $status_class = 'status-completed';
-                                        else if ($section == 'Cancelled') $status_class = 'status-cancelled';
-                                    ?>
-                                    <span class="booking-status <?= $status_class ?>">
-                                        <?= ucfirst($b['status']) ?>
-                                    </span>
-                                </td>
+
+                                <td><?= number_format((float)$b['total_price'], 2) ?></td>
+                                <td><span class="booking-status <?= $status_class ?>"><?= ucfirst($raw_status) ?></span></td>
                                 <td class="booking-actions">
-                                    <?php if ($section == 'Pending'): ?>
-                                        <a class="action-btn view" href="view_booking.php?booking_id=<?= $b['booking_id'] ?>">View</a>
-                                        <?php if (strtolower($b['status']) === 'approved'): ?>
-                                            <a class="action-btn" style="background:#f8a100;" href="payment.php?booking_id=<?= $b['booking_id'] ?>">Pay</a>
+                                    <a class="action-btn view" href="view_booking.php?booking_id=<?= (int)$b['booking_id'] ?>">View</a>
+
+                                    <?php if ($section === 'Pending'): ?>
+                                        <?php if ($raw_status === 'approved'): ?>
+                                            <?php if ($can_pay): ?>
+                                                <a class="action-btn" style="background:#f8a100;" href="payment.php?booking_id=<?= (int)$b['booking_id'] ?>">Pay</a>
+                                            <?php else: ?>
+                                                <span style="color:#999;font-size:0.85em;"><?= htmlspecialchars($pay_blocker_reason) ?></span>
+                                            <?php endif; ?>
                                         <?php else: ?>
-                                            <span style="color:#999;font-size:0.98em;">Awaiting admin approval</span>
+                                            <span style="color:#999;font-size:0.92em;">Awaiting admin approval</span>
                                         <?php endif; ?>
-                                        <?php if ($can_cancel): ?>
-                                            <form action="cancel_booking.php" method="post" style="display:inline;">
-                                                <input type="hidden" name="booking_id" value="<?= $b['booking_id'] ?>">
-                                                <button type="submit" class="action-btn cancel" onclick="return confirm('Are you sure you want to cancel this booking?');">Cancel</button>
-                                            </form>
-                                        <?php else: ?>
-                                            <span style="color:#999;font-size:0.98em;">Cannot cancel less than 1 day before pickup</span>
-                                        <?php endif; ?>
-                                    <?php elseif ($section == 'Upcoming'): ?>
-                                        <a class="action-btn view" href="view_booking.php?booking_id=<?= $b['booking_id'] ?>">View</a>
-                                        <?php if ($can_cancel): ?>
-                                            <form action="cancel_booking.php" method="post" style="display:inline;">
-                                                <input type="hidden" name="booking_id" value="<?= $b['booking_id'] ?>">
-                                                <button type="submit" class="action-btn cancel" onclick="return confirm('Are you sure you want to cancel? You will NOT get your deposit back. Any eligible refund will be credited to your account within 3 - 5 days after cancellation.');">Cancel</button>
-                                            </form>
-                                        <?php else: ?>
-                                            <span style="color:#999;font-size:0.98em;">Cannot cancel less than 1 day before pickup</span>
-                                        <?php endif; ?>
-                                    <?php elseif ($section == 'Completed'): ?>
-                                        <a class="action-btn view" href="view_booking.php?booking_id=<?= $b['booking_id'] ?>">View</a>
-                                    <?php elseif ($section == 'Cancelled'): ?>
-                                        <a class="action-btn view" href="view_booking.php?booking_id=<?= $b['booking_id'] ?>">View</a>
+                                    <?php endif; ?>
+
+                                    <?php if ($is_cancellable): ?>
+                                        <form action="cancel_booking.php" method="post" style="display:inline;" onsubmit="return confirm('Are you sure you want to cancel this booking?');">
+                                            <input type="hidden" name="booking_id" value="<?= (int)$b['booking_id'] ?>">
+                                            <button type="submit" class="action-btn cancel">Cancel</button>
+                                        </form>
+                                    <?php elseif (($section === 'Pending' || $section === 'Upcoming') && !$is_cancellable): ?>
+                                        <span style="color:#999;font-size:0.88em;">Cannot cancel &lt; 24h</span>
                                     <?php endif; ?>
                                 </td>
                             </tr>
@@ -407,6 +330,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 <?php endif; ?>
             </div>
         <?php endforeach; ?>
+
         <button class="back-btn" onclick="window.location.href='dashboard.php'">Back</button>
     </div>
 </div>

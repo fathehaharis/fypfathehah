@@ -1,379 +1,566 @@
 <?php
-// Enable error reporting (remove or adjust for production)
-ini_set('display_errors', 1);
-ini_set('display_startup_errors', 1);
-error_reporting(E_ALL);
+/*
+  booking_submit.php
+  Creates booking + guarantor + (optional) service + full agreement PDF (with images & signature) stored as LONGBLOB.
+  (Admin signature placeholder removed as requested.)
+*/
 
 session_start();
-if (
-    !isset($_SESSION['cust_id']) ||
-    !isset($_SESSION['booking_data']) ||
-    !isset($_SESSION['driver_data']) ||
-    !isset($_SESSION['guarantor_data']) ||
-    $_SERVER['REQUEST_METHOD'] !== 'POST' ||
-    empty($_POST['agree']) ||
-    empty($_POST['signature_data'])
+date_default_timezone_set('Asia/Kuala_Lumpur');
+
+ini_set('display_errors',1);
+ini_set('display_startup_errors',1);
+error_reporting(E_ALL);
+
+if ($_SERVER['REQUEST_METHOD'] !== 'POST'
+    || empty($_SESSION['cust_id'])
+    || empty($_SESSION['booking_data'])
+    || empty($_SESSION['guarantor_data'])
+    || empty($_POST['agree'])
+    || empty($_POST['signature_data'])
 ) {
     header("Location: /index.php");
     exit;
 }
 
-require_once($_SERVER['DOCUMENT_ROOT'] . '/vendor/tecnickcom/tcpdf/tcpdf.php');
+$cust_id     = (int)$_SESSION['cust_id'];
+$booking     = $_SESSION['booking_data'];
+$guarSession = $_SESSION['guarantor_data'];
+
+/* Normalize legacy keys */
+if (empty($booking['delivery_location']) && !empty($booking['location_delivery'])) {
+    $booking['delivery_location'] = $booking['location_delivery'];
+}
+if (empty($booking['return_location']) && !empty($booking['location_return'])) {
+    $booking['return_location'] = $booking['location_return'];
+}
+
+$car_id            = (int)($booking['car_id'] ?? 0);
+$pickup_datetime   = $booking['pickup_datetime'] ?? '';
+$return_datetime   = $booking['return_datetime'] ?? '';
+$delivery_type     = $booking['delivery_type'] ?? 'self_pickup';
+$delivery_location = trim($booking['delivery_location'] ?? '');
+$return_location   = trim($booking['return_location'] ?? '');
+
 include '../connect.php';
-include '../includes/header.php';
 
-// Helper: save uploaded blob to temp file and return path
-function blob_to_tempfile($blob, $prefix) {
-    if (!$blob) return null;
-    $tmpfname = tempnam(sys_get_temp_dir(), $prefix);
-    file_put_contents($tmpfname, $blob);
-    return $tmpfname;
-}
-
-// 1. Gather all session & form data
-$cust_id = $_SESSION['cust_id'];
-$booking = $_SESSION['booking_data'];
-$driver = $_SESSION['driver_data'];
-$guarantor = $_SESSION['guarantor_data'];
-
-$car_id = $booking['car_id'];
-$pickup_datetime = $booking['pickup_datetime'];
-$return_datetime = $booking['return_datetime'];
-$delivery_type = $booking['delivery_type'];
-
-// 2. Fetch both daily_rate and hourly_rate from car
-$stmt_car = $conn->prepare("SELECT daily_rate, hourly_rate FROM car WHERE car_id = ?");
-$stmt_car->bind_param("i", $car_id);
-$stmt_car->execute();
-$result_car = $stmt_car->get_result();
-$car_row = $result_car->fetch_assoc();
-$daily_rate = $car_row['daily_rate'] ?? 0;
-$hourly_rate = $car_row['hourly_rate'] ?? 0;
-$stmt_car->close();
-
-// 3. Calculate mixed daily + hourly duration
-$pickup = new DateTime($pickup_datetime);
-$return = new DateTime($return_datetime);
-$interval = $pickup->diff($return);
-$total_hours = ($interval->days * 24) + $interval->h + ($interval->i > 0 ? 1 : 0);
-
-$day_count = floor($total_hours / 24);
-$hour_count = $total_hours % 24;
-
-$subtotal = ($day_count * $daily_rate) + ($hour_count * $hourly_rate);
-
-// 4. Delivery fee & total
-$delivery_fee = 0;
-if ($delivery_type !== "self_pickup") {
-    $delivery_fee = ($delivery_type === "delivery") ? 10.00 : 30.00;
-}
-
-// 5. Security Deposit (fixed at RM100)
-$security_deposit = 100.00;
-
-// 6. Grand total includes security deposit
-$total_price = $subtotal + $delivery_fee + $security_deposit;
-$status = 'waiting_verification';
-
-// 7. Insert driver info into driver table, get driver_id
-$id_front_blob = isset($driver['id_front']) && !empty($driver['id_front']) && file_exists($driver['id_front']) 
-    ? file_get_contents($driver['id_front'])
-    : null;
-$id_back_blob = isset($driver['id_back']) && !empty($driver['id_back']) && file_exists($driver['id_back']) 
-    ? file_get_contents($driver['id_back'])
-    : null;
-
-$stmt_driver = $conn->prepare("INSERT INTO driver 
-    (cust_id, full_name, phone_no, id_no, id_front_image, id_back_image, address, age) 
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
-$stmt_driver->bind_param(
-    "isssssssi",
-    $cust_id,
-    $driver['full_name'],
-    $driver['phone_no'],
-    $driver['id_no'],
-    $id_front_blob,
-    $id_back_blob,
-    $driver['address'],
-    $driver['age']
-);
-if ($id_front_blob !== null) $stmt_driver->send_long_data(4, $id_front_blob);
-if ($id_back_blob !== null) $stmt_driver->send_long_data(5, $id_back_blob);
-$stmt_driver->execute();
-if ($stmt_driver->error) die('Driver insert error: ' . $stmt_driver->error);
-$driver_id = $stmt_driver->insert_id;
-$stmt_driver->close();
-
-// 8. Insert booking record, referencing driver_id
-$stmt = $conn->prepare("INSERT INTO booking
-    (cust_id, driver_id, car_id, pickup_datetime, return_datetime, day_count, hour_count, daily_rate, hourly_rate, total_price, security_deposit, status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-$stmt->bind_param("iiissiidddds",
-    $cust_id,
-    $driver_id,
-    $car_id,
-    $pickup_datetime,
-    $return_datetime,
-    $day_count,
-    $hour_count,
-    $daily_rate,
-    $hourly_rate,
-    $total_price,
-    $security_deposit,
-    $status
-);
+/* Car info */
+if ($car_id <= 0) die("Invalid car id.");
+$stmt = $conn->prepare("SELECT car_brand, car_model, daily_rate FROM car WHERE car_id = ?");
+$stmt->bind_param("i", $car_id);
 $stmt->execute();
-if ($stmt->error) die('Booking insert error: ' . $stmt->error);
-$booking_id = $stmt->insert_id;
+$car = $stmt->get_result()->fetch_assoc();
 $stmt->close();
+if (!$car) die("Car not found.");
+$daily_rate = (float)$car['daily_rate'];
 
-// 9. Insert service (delivery/pickup info)
-if ($delivery_type !== "self_pickup") {
-    $fee = ($delivery_type === "delivery") ? 10.00 : 30.00;
-    $notes = $booking['notes'] ?? null;
-    $stmt2 = $conn->prepare("INSERT INTO service (booking_id, service_type, fee, notes) VALUES (?, ?, ?, ?)");
-    $stmt2->bind_param("isds", $booking_id, $delivery_type, $fee, $notes);
-    $stmt2->execute();
-    if ($stmt2->error) {
-        die("Service insert error: " . $stmt2->error);
-    }
-    $stmt2->close();
+/* Duration */
+try {
+    $pickupDT = new DateTime($pickup_datetime);
+    $returnDT = new DateTime($return_datetime);
+} catch(Throwable $e) {
+    die("Invalid pickup/return datetime.");
 }
+if ($returnDT <= $pickupDT) die("Return must be after pickup.");
 
-// 10. Insert guarantor record
-$guar_id_front_blob = isset($guarantor['guarantor_id_front']) && !empty($guarantor['guarantor_id_front']) && file_exists($guarantor['guarantor_id_front']) 
-    ? file_get_contents($guarantor['guarantor_id_front'])
-    : null;
-$guar_id_back_blob = isset($guarantor['guarantor_id_back']) && !empty($guarantor['guarantor_id_back']) && file_exists($guarantor['guarantor_id_back']) 
-    ? file_get_contents($guarantor['guarantor_id_back'])
-    : null;
-$stmt4 = $conn->prepare("INSERT INTO guarantor (driver_id, full_name, phone_no, id_no, id_front_image, id_back_image, relationship) VALUES (?, ?, ?, ?, ?, ?, ?)");
-$stmt4->bind_param(
-    "issssss",
-    $driver_id,
-    $guarantor['guarantor_full_name'],
-    $guarantor['guarantor_phone_no'],
-    $guarantor['guarantor_id_no'],
-    $guar_id_front_blob,
-    $guar_id_back_blob,
-    $guarantor['guarantor_relationship']
+$days = isset($booking['booking_duration'])
+    ? (int)$booking['booking_duration']
+    : max(1, (int)$pickupDT->diff($returnDT)->days);
+if ($days < 1) $days = 1;
+
+/* Financials (provisional) */
+$rental_subtotal = isset($booking['rental_subtotal'])
+    ? (float)$booking['rental_subtotal']
+    : $daily_rate * $days;
+
+$security_deposit = isset($booking['security_deposit'])
+    ? (float)$booking['security_deposit']
+    : 100.00;
+
+$provisional_total = isset($booking['provisional_total'])
+    ? (float)$booking['provisional_total']
+    : ($rental_subtotal + $security_deposit);
+
+$total_price = $provisional_total; // stored now (no delivery fee yet)
+$status = 'pending';
+
+/* Guarantor image blobs from temp paths */
+function readTempFile(?string $path): ?string {
+    return ($path && file_exists($path)) ? file_get_contents($path) : null;
+}
+$g_front_blob = readTempFile($guarSession['guarantor_id_front'] ?? '');
+$g_back_blob  = readTempFile($guarSession['guarantor_id_back'] ?? '');
+
+/* Signature */
+$signature_data   = $_POST['signature_data'];
+$signature_binary = base64_decode(preg_replace('#^data:image/\w+;base64,#i','',$signature_data));
+if (!$signature_binary) die("Invalid signature data.");
+
+/* Fetch full customer detail (including images) */
+$custStmt = $conn->prepare("
+    SELECT full_name, phone_no, email, id_no, address, age,
+           id_front_image, id_back_image,
+           license_front_image, license_back_image
+    FROM customer
+    WHERE cust_id = ?
+    LIMIT 1
+");
+$custStmt->bind_param("i", $cust_id);
+$custStmt->execute();
+$custStmt->bind_result(
+    $c_full_name, $c_phone, $c_email, $c_id_no, $c_address, $c_age,
+    $c_id_front_img, $c_id_back_img, $c_license_front_img, $c_license_back_img
 );
-if ($guar_id_front_blob !== null) $stmt4->send_long_data(4, $guar_id_front_blob);
-if ($guar_id_back_blob !== null) $stmt4->send_long_data(5, $guar_id_back_blob);
-$stmt4->execute();
-if ($stmt4->error) {
-    die('Guarantor insert error: ' . $stmt4->error);
-}
-$guarantor_id = $stmt4->insert_id;
-$stmt4->close();
+$custStmt->fetch();
+$custStmt->close();
 
-// 11. Handle signature image (from base64)
-$signature_data = $_POST['signature_data'];
-$signature_binary = base64_decode(preg_replace('#^data:image/\w+;base64,#i', '', $signature_data));
-$signature_dir = '../uploads/signatures/';
-$signature_path = $signature_dir . uniqid('cust_sig_') . '.png';
-if (!is_dir($signature_dir)) mkdir($signature_dir, 0777, true);
-file_put_contents($signature_path, $signature_binary);
-
-// 12. Prepare temp image files for PDF display (from session path or blob)
-$driver_id_front_path = !empty($driver['id_front']) && file_exists($driver['id_front'])
-    ? $driver['id_front']
-    : (isset($id_front_blob) && $id_front_blob ? blob_to_tempfile($id_front_blob, 'drfront_') : null);
-
-$driver_id_back_path = !empty($driver['id_back']) && file_exists($driver['id_back'])
-    ? $driver['id_back']
-    : (isset($id_back_blob) && $id_back_blob ? blob_to_tempfile($id_back_blob, 'drback_') : null);
-
-$guar_id_front_path = !empty($guarantor['guarantor_id_front']) && file_exists($guarantor['guarantor_id_front'])
-    ? $guarantor['guarantor_id_front']
-    : (isset($guar_id_front_blob) && $guar_id_front_blob ? blob_to_tempfile($guar_id_front_blob, 'gfront_') : null);
-$guar_id_back_path = !empty($guarantor['guarantor_id_back']) && file_exists($guarantor['guarantor_id_back'])
-    ? $guarantor['guarantor_id_back']
-    : (isset($guar_id_back_blob) && $guar_id_back_blob ? blob_to_tempfile($guar_id_back_blob, 'gback_') : null);
-
-// 13. Generate agreement PDF with TCPDF using DRIVER and GUARANTOR details and images
-$agreement_terms = <<<EOT
+/* Build full PDF (store as LONGBLOB) */
+$pdf_binary = null;
+$terms_text = <<<EOT
 AGREEMENT OF VEHICLE USAGE BETWEEN BORROWER AND TIMELESS CAR RENTAL
 
-TimeLess Car Rental is a brand operated by TimeLess Car Rental. Attached herewith are the terms and conditions that shall be between the BORROWER of the vehicle and TimeLess Car Rental. When the agreement is signed, the BORROWER has acknowledged that he/she has read, understood and agreed to the terms and conditions.
+By signing, the BORROWER acknowledges reading, understanding and agreeing:
 
-IT IS HEREBY AGREED AS FOLLOWS:
-1. The consolation loan agreed for this vehicle is as per agreed in the quotation. No claim will be made by the BORROWER if the vehicle is returned earlier than the promised expiry date and time.
-2. TimeLess Car Rental reserves the right to claim additional consolation if the vehicle is returned late after the expiry of the LOAN as above. For vehicles with a daily rate of less than RM300, the value claimed is RM25/hour. For vehicles with a daily rate of more than RM300, the claimed value is RM60/hour. TimeLess Car Rental also has the right to exercise discretion in determining the level of demand for this clause (2).
-3. Any loan extension must be notified to TimeLess Car Rental at least 3 hours in advance, subject to the availability of the vehicle. BORROWER agrees to all terms and conditions agreed in this agreement for the duration of the extension period. Only ONE (1) EXTENSION is allowed. For the next loan extension, the BORROWER must be present at the TimeLess Car Rental office with the vehicle for approval.
-4. This vehicle is not used for any kind of criminal activities or offences under the laws of Malaysia.
-5. THE BORROWER is fully responsible in the event of misuse of this vehicle such as being involved in any kind of criminal activities or offences under the laws of Malaysia.
-6. It is a responsibility for the BORROWERS to pay all summonses, compounds, or fines within the LOAN tenure as above.
-7. TimeLess Car Rental reserves the right to claim any compensation in the event of any damage/accident/replacement of spare parts without TimeLess Car Rental's consent involving the vehicle during the LOAN period as above.
-8. If the vehicle is not found/lost/severely damaged after the LOAN period of this vehicle as above, the BORROWER is responsible for all costs and claims incurred by TimeLess Car Rental involving this vehicle.
-9. TimeLess Car Rental reserves the right to request/keep a copy of the Identity Card/Driver's License/Student Card/Employee Card or any supporting documents of this vehicle BORROWER/GUARANTOR for the purpose of further action related to all processes related to the above vehicle rental.
-10. THE BORROWER will be responsible for any issues arising for the duration of the loan if such issues arise after the return of the deposit. TimeLess Car Rental reserves the right to make claims against borrowers to resolve such issues.
-11. The vehicle is provided with full fuel. THE BORROWER is responsible for returning the vehicle in a state of full oil. Failure will entitle TimeLess Car Rental to claim RM100 for refuelling and service charges.
-12. TimeLess Car Rental reserves the right to contact the Guarantor given by the BORROWER for the purpose of resolving any issues arising in relation to the vehicle loan if the BORROWER is unable to resolve the arising issues. This is in line with the consent that has been given by the GUARANTOR.
-13. Only BORROWERs are allowed to drive the above vehicles. Third parties are not allowed to drive the above vehicles.
-14. The BORROWER acknowledges that TimeLess Car Rental does not provide any personal accident and damage/loss of property insurance to the BORROWER. The BORROWER is solely responsible for the personal safety and property of the BORROWER.
-15. THE BORROWER AND GUARANTOR testified and acknowledge that the TimeLess Car Rental REPRESENTATIVE had shown that each compartment in the parts of the vehicle was empty/did not contain any prohibited goods in violation of Malaysian laws. The BORROWER and GUARANTOR release TimeLess Car Rental and its representatives from any legal claims if any prohibited items are found by the authorities, in the vehicle for the entire period of use of the vehicle by the BORROWER and GUARANTOR.
-16. The agreed security deposit is as per agreed in the quotation. The security deposit is taken for wagering purposes for any breach of conditions and/or driving outside the stated destination and/or payment of part of the summons issue by the BORROWER during the loan tenure. The security deposit will be refunded (either in full or the balance after deduction if an issue arises) to the BORROWER on/after FIVE(5) WORKING DAYS after the vehicle has been returned to TimeLess Car Rental.
+1. No refund for early return.
+2. Late return extra charges (RM25/hr if daily rate < RM300; RM60/hr if >= RM300) possible.
+3. One extension only; further requires inspection/approval.
+4. No illegal use.
+5. Borrower responsible for misuse/offences.
+6. Borrower settles all summons/fines.
+7. Damages / unauthorized repairs claimable.
+8. Loss/severe damage costs borne by Borrower.
+9. Company may retain copies of IDs/documents.
+10. Borrower still liable for issues originating during rental discovered later.
+11. Return with full fuel (refueling/service charge may apply).
+12. Company may contact Guarantor if Borrower unresponsive.
+13. Only the Borrower may drive the vehicle.
+14. No personal accident/property insurance provided by company.
+15. Compartments shown empty of prohibited items at handover.
+16. Security deposit refundable (less deductions) within 5 working days after return.
+
+Delivery Fee (if service selected) is not yet included unless admin already added it.
 EOT;
 
-$pdf = new TCPDF();
-$pdf->AddPage();
-$pdf->SetFont('helvetica', '', 11);
-$pdf->MultiCell(0, 10, "AGREEMENT OF VEHICLE USAGE BETWEEN BORROWER AND TIMELESS CAR RENTAL", 0, 'C');
-$pdf->Ln(5);
-$pdf->SetFont('helvetica', '', 10);
-$pdf->MultiCell(0, 7, $agreement_terms, 0, 'L');
-$pdf->Ln(7);
+$tcpdf_path = $_SERVER['DOCUMENT_ROOT'].'/vendor/tecnickcom/tcpdf/tcpdf.php';
+if (file_exists($tcpdf_path)) {
+    require_once $tcpdf_path;
 
-// Driver section
-$pdf->SetFont('helvetica', '', 10);
-$pdf->MultiCell(0, 7, "Driver Name: {$driver['full_name']}", 0, 'L');
-$pdf->MultiCell(0, 7, "Driver Phone: {$driver['phone_no']}", 0, 'L');
-$pdf->MultiCell(0, 7, "Driver ID No: {$driver['id_no']}", 0, 'L');
+    function blobToTempImg(?string $blob, string $prefix='img_'): ?string {
+        if (!$blob) return null;
+        $info = @getimagesizefromstring($blob);
+        if (!$info) return null;
+        $ext = match($info['mime'] ?? '') {
+            'image/jpeg' => '.jpg',
+            'image/png'  => '.png',
+            'image/gif'  => '.gif',
+            default      => '.bin'
+        };
+        $tmp = tempnam(sys_get_temp_dir(), $prefix);
+        $final = $tmp.$ext;
+        rename($tmp,$final);
+        file_put_contents($final,$blob);
+        return $final;
+    }
 
-// Driver ID Images
-$pdf->SetFont('helvetica', 'B', 10);
-$pdf->MultiCell(0, 7, "Driver License Images (Front & Back):", 0, 'L');
-$pdf->SetFont('helvetica', '', 10);
-if (!empty($driver_id_front_path) && file_exists($driver_id_front_path)) {
-    $pdf->Image($driver_id_front_path, $pdf->GetX(), $pdf->GetY(), 60, 35, '', '', '', false, 300);
-    $pdf->Ln(37);
-} else {
-    $pdf->MultiCell(0, 7, "Front License not available.", 0, 'L');
+    $sig_tmp = tempnam(sys_get_temp_dir(), 'sig_').'.png';
+    file_put_contents($sig_tmp, $signature_binary);
+
+    $cust_id_front_file  = blobToTempImg($c_id_front_img,'cidf_');
+    $cust_id_back_file   = blobToTempImg($c_id_back_img,'cidb_');
+    $cust_lic_front_file = blobToTempImg($c_license_front_img,'clif_');
+    $cust_lic_back_file  = blobToTempImg($c_license_back_img,'clib_');
+
+    $guar_id_front_file  = blobToTempImg($g_front_blob,'gidf_');
+    $guar_id_back_file   = blobToTempImg($g_back_blob,'gidb_');
+
+    $agreement_number = 'AGR-'.strtoupper(dechex(time())).'-P';
+    $nowPrint = (new DateTime())->format('Y-m-d H:i:s');
+
+    $delivery_type_label = ucwords(str_replace('_',' ',$delivery_type));
+    $delivery_line = ($delivery_type === 'self_pickup')
+        ? 'Self Pickup'
+        : $delivery_type_label
+          . ($delivery_location ? ' | Delivery: '.htmlspecialchars($delivery_location) : '')
+          . ($delivery_type === 'pickup_and_return' && $return_location ? ' | Return Pickup: '.htmlspecialchars($return_location) : '');
+
+    $financial_rows = (in_array($delivery_type,['delivery','pickup_and_return'],true))
+        ? "<tr><td>Rental Subtotal</td><td style='text-align:right;'>RM ".number_format($rental_subtotal,2)."</td></tr>
+           <tr><td>Security Deposit</td><td style='text-align:right;'>RM ".number_format($security_deposit,2)."</td></tr>
+           <tr><td>Delivery Fee</td><td style='text-align:right;color:#b36a08;'>PENDING</td></tr>
+           <tr><td><strong>Provisional Total (Excl Delivery)</strong></td><td style='text-align:right;'><strong>RM ".number_format($provisional_total,2)."</strong></td></tr>"
+        : "<tr><td>Rental Subtotal</td><td style='text-align:right;'>RM ".number_format($rental_subtotal,2)."</td></tr>
+           <tr><td>Security Deposit</td><td style='text-align:right;'>RM ".number_format($security_deposit,2)."</td></tr>
+           <tr><td><strong>Total Payable</strong></td><td style='text-align:right;'><strong>RM ".number_format($provisional_total,2)."</strong></td></tr>";
+
+    $pdf = new TCPDF();
+    $pdf->SetCreator('Timeless Car Rental');
+    $pdf->SetAuthor('Timeless Car Rental');
+    $pdf->SetTitle('Vehicle Rental Agreement');
+    $pdf->SetMargins(14,18,14);
+    $pdf->AddPage();
+
+    $pdf->SetFont('helvetica','B',15);
+    $pdf->Cell(0,9,'VEHICLE RENTAL AGREEMENT',0,1,'C');
+    $pdf->SetFont('helvetica','',9);
+    $pdf->Cell(0,6,"Agreement #: {$agreement_number}",0,1,'R');
+    $pdf->Cell(0,6,"Generated: {$nowPrint}",0,1,'R');
+    $pdf->Ln(2);
+
+    $pdf->writeHTML("
+      <h4 style='font-weight:bold;'>1. Booking & Vehicle</h4>
+      <table cellpadding='4' width='100%' style='font-size:9pt;'>
+        <tr><td width='40%'>Car</td><td>".htmlspecialchars($car['car_brand'].' '.$car['car_model'])."</td></tr>
+        <tr><td>Pickup</td><td>".$pickupDT->format('Y-m-d H:i')."</td></tr>
+        <tr><td>Return</td><td>".$returnDT->format('Y-m-d H:i')."</td></tr>
+        <tr><td>Duration (days)</td><td>{$days}</td></tr>
+        <tr><td>Service / Delivery</td><td>{$delivery_line}</td></tr>
+      </table>
+
+      <h4 style='font-weight:bold;'>2. Borrower (Customer)</h4>
+      <table cellpadding='4' width='100%' style='font-size:9pt;'>
+        <tr><td width='40%'>Customer ID</td><td>{$cust_id}</td></tr>
+        <tr><td>Full Name</td><td>".htmlspecialchars($c_full_name ?? '')."</td></tr>
+        <tr><td>Email</td><td>".htmlspecialchars($c_email ?? '')."</td></tr>
+        <tr><td>Phone</td><td>".htmlspecialchars($c_phone ?? '')."</td></tr>
+        <tr><td>ID Number</td><td>".htmlspecialchars($c_id_no ?? '')."</td></tr>
+        <tr><td>Address</td><td>".htmlspecialchars($c_address ?? '')."</td></tr>
+        <tr><td>Age</td><td>".htmlspecialchars($c_age ?? '')."</td></tr>
+      </table>
+    ", true,false,true,false,'');
+
+    /* Borrower image grid */
+    $pdf->SetFont('helvetica','B',10);
+    $pdf->Cell(0,6,'Borrower ID & License Images',0,1,'L');
+    $pdf->SetFont('helvetica','',8);
+    $imgW=55; $imgH=35; $gap=6;
+    $baseX = $pdf->GetX();
+    $baseY = $pdf->GetY();
+    $col=0;
+    $borrowerImgs = [
+        ['label'=>'ID Front','file'=>$cust_id_front_file],
+        ['label'=>'ID Back','file'=>$cust_id_back_file],
+        ['label'=>'License Front','file'=>$cust_lic_front_file],
+        ['label'=>'License Back','file'=>$cust_lic_back_file],
+    ];
+    foreach ($borrowerImgs as $bimg) {
+        if ($pdf->GetY() + $imgH + 20 > ($pdf->getPageHeight() - $pdf->getBreakMargin())) {
+            $pdf->AddPage();
+            $baseX = $pdf->GetX();
+            $baseY = $pdf->GetY();
+            $col = 0;
+        }
+        $x = $baseX + ($col * ($imgW + $gap + 8));
+        $y = $baseY;
+        $pdf->SetXY($x,$y);
+        $pdf->MultiCell($imgW,5,$bimg['label'],0,'C');
+        $y += 7;
+        if ($bimg['file'] && file_exists($bimg['file']) && filesize($bimg['file'])>0) {
+            $pdf->Image($bimg['file'],$x,$y,$imgW,$imgH,'','', '',false,300);
+            $pdf->Rect($x,$y,$imgW,$imgH);
+        } else {
+            $pdf->Rect($x,$y,$imgW,$imgH);
+            $pdf->SetXY($x,$y+10);
+            $pdf->MultiCell($imgW,5,'(No Image)',0,'C');
+        }
+        $col++;
+        if ($col >= 3) {
+            $col=0;
+            $baseY += ($imgH + 18);
+        }
+    }
+    if ($col!==0) {
+        $baseY += ($imgH + 18);
+        $col=0;
+    }
+    $pdf->SetY($baseY+4);
+
+    /* Guarantor section */
+    $pdf->writeHTML("
+      <h4 style='font-weight:bold;'>3. Guarantor</h4>
+      <table cellpadding='4' width='100%' style='font-size:9pt;'>
+        <tr><td width='40%'>Full Name</td><td>".htmlspecialchars($guarSession['guarantor_full_name'])."</td></tr>
+        <tr><td>Phone</td><td>".htmlspecialchars($guarSession['guarantor_phone_no'])."</td></tr>
+        <tr><td>ID Number</td><td>".htmlspecialchars($guarSession['guarantor_id_no'])."</td></tr>
+        <tr><td>Relationship</td><td>".htmlspecialchars($guarSession['guarantor_relationship'])."</td></tr>
+      </table>
+    ", true,false,true,false,'');
+
+    /* Guarantor images */
+    $pdf->SetFont('helvetica','B',10);
+    $pdf->Cell(0,6,'Guarantor ID Images',0,1,'L');
+    $pdf->SetFont('helvetica','',8);
+    $gImages = [
+        ['label'=>'Guarantor ID Front','file'=>$guar_id_front_file],
+        ['label'=>'Guarantor ID Back','file'=>$guar_id_back_file],
+    ];
+    $col=0; $startX=$pdf->GetX(); $rowY=$pdf->GetY(); $colWidth=90;
+    foreach ($gImages as $gim){
+        if ($pdf->GetY() + $imgH + 20 > ($pdf->getPageHeight() - $pdf->getBreakMargin())) {
+            $pdf->AddPage();
+            $startX=$pdf->GetX(); $rowY=$pdf->GetY(); $col=0;
+        }
+        $x = $startX + ($col * $colWidth);
+        $pdf->SetXY($x,$rowY);
+        $pdf->MultiCell($colWidth,5,$gim['label'],0,'L');
+        $yImg = $pdf->GetY()+2;
+        if ($gim['file'] && file_exists($gim['file']) && filesize($gim['file'])>0) {
+            $pdf->Image($gim['file'],$x,$yImg,$imgW,$imgH,'','', '',false,300);
+            $pdf->Rect($x,$yImg,$imgW,$imgH);
+        } else {
+            $pdf->Rect($x,$yImg,$imgW,$imgH);
+            $pdf->SetXY($x,$yImg+10);
+            $pdf->MultiCell($colWidth,6,'(No Image / Empty)',0,'C');
+        }
+        $col++;
+        if ($col===2) { $col=0; $rowY += ($imgH + 22); }
+    }
+    if ($col!==0) $rowY += ($imgH + 22);
+    $pdf->SetY($rowY+4);
+
+    /* Financial summary */
+    $pdf->writeHTML("
+      <h4 style='font-weight:bold;'>4. Financial Summary</h4>
+      <table cellpadding='5' width='100%' style='font-size:9pt;'>
+        {$financial_rows}
+      </table>
+    ", true,false,true,false,'');
+    if (in_array($delivery_type,['delivery','pickup_and_return'],true)) {
+        $pdf->SetFont('helvetica','I',7.5);
+        $pdf->MultiCell(0,4,'(Delivery fee pending – final amount will change when set)',0,'L');
+        $pdf->SetFont('helvetica','',9);
+    }
+
+    /* Terms */
+    $pdf->AddPage();
+    $pdf->SetFont('helvetica','B',11);
+    $pdf->MultiCell(0,7,'5. Terms & Conditions',0,'L');
+    $pdf->SetFont('helvetica','',8.3);
+    $pdf->MultiCell(0,5,$terms_text,0,'L');
+
+    /* Signature (admin signature placeholder REMOVED) */
+    $pdf->Ln(6);
+    $pdf->SetFont('helvetica','B',11);
+    $pdf->MultiCell(0,7,'6. Signature',0,'L');
+    $pdf->SetFont('helvetica','',9);
+    $pdf->MultiCell(0,5,'Borrower acknowledges acceptance of all terms by the signature below.',0,'L');
+    $pdf->Ln(3);
+    $pdf->SetFont('helvetica','',8);
+    $pdf->MultiCell(80,5,"Borrower Signature:",0,'L');
+    if (file_exists($sig_tmp)) {
+        $pdf->Image($sig_tmp,$pdf->GetX()+2,$pdf->GetY(),55,25,'PNG');
+        $pdf->Ln(30);
+    } else {
+        $pdf->Ln(12);
+        $pdf->MultiCell(0,5,'(Signature missing)',0,'L');
+    }
+    $pdf->MultiCell(0,5,htmlspecialchars($c_full_name ?? 'Borrower'),0,'L');
+
+    // REMOVED ADMIN SIGNATURE PLACEHOLDER LINES HERE
+
+    $pdf_binary = $pdf->Output('', 'S');
+
+    // Clean temp
+    foreach ([
+        $sig_tmp,
+        $cust_id_front_file,$cust_id_back_file,$cust_lic_front_file,$cust_lic_back_file,
+        $guar_id_front_file,$guar_id_back_file
+    ] as $tmp) {
+        if ($tmp && file_exists($tmp)) @unlink($tmp);
+    }
 }
-if (!empty($driver_id_back_path) && file_exists($driver_id_back_path)) {
-    $pdf->Image($driver_id_back_path, $pdf->GetX(), $pdf->GetY(), 60, 35, '', '', '', false, 300);
-    $pdf->Ln(37);
-} else {
-    $pdf->MultiCell(0, 7, "Back License not available.", 0, 'L');
+
+/* Transaction: guarantor + booking + service + agreement */
+$conn->begin_transaction();
+try {
+    // Reuse guarantor if same ID
+    $guarantor_id = null;
+    if (!empty($guarSession['guarantor_id_no'])) {
+        $chk = $conn->prepare("SELECT guarantor_id FROM guarantor WHERE cust_id=? AND id_no=? LIMIT 1");
+        $chk->bind_param("is",$cust_id,$guarSession['guarantor_id_no']);
+        $chk->execute();
+        $chk->bind_result($existing_gid);
+        $chk->fetch();
+        $chk->close();
+        if (!empty($existing_gid)) $guarantor_id = (int)$existing_gid;
+    }
+    if (!$guarantor_id) {
+        $gStmt = $conn->prepare("
+          INSERT INTO guarantor (cust_id, full_name, phone_no, id_no, id_front_image, id_back_image, relationship)
+          VALUES (?,?,?,?,?,?,?)
+        ");
+        $front_for_bind = $g_front_blob;
+        $back_for_bind  = $g_back_blob;
+        $gStmt->bind_param(
+            "isssbbs",
+            $cust_id,
+            $guarSession['guarantor_full_name'],
+            $guarSession['guarantor_phone_no'],
+            $guarSession['guarantor_id_no'],
+            $front_for_bind,
+            $back_for_bind,
+            $guarSession['guarantor_relationship']
+        );
+        if ($g_front_blob !== null) $gStmt->send_long_data(4, $g_front_blob);
+        if ($g_back_blob  !== null) $gStmt->send_long_data(5, $g_back_blob);
+        $gStmt->execute();
+        if ($gStmt->error) throw new Exception("Guarantor insert error: ".$gStmt->error);
+        $guarantor_id = $gStmt->insert_id;
+        $gStmt->close();
+    }
+
+    $bStmt = $conn->prepare("
+        INSERT INTO booking
+        (cust_id, car_id, pickup_datetime, return_datetime, day_count, daily_rate, total_price, security_deposit, status)
+        VALUES (?,?,?,?,?,?,?,?,?)
+    ");
+    $bStmt->bind_param(
+        "iissiidis",
+        $cust_id,
+        $car_id,
+        $pickup_datetime,
+        $return_datetime,
+        $days,
+        $daily_rate,
+        $total_price,
+        $security_deposit,
+        $status
+    );
+    $bStmt->execute();
+    if ($bStmt->error) throw new Exception("Booking insert error: ".$bStmt->error);
+    $booking_id = $bStmt->insert_id;
+    $bStmt->close();
+
+    if (in_array($delivery_type,['delivery','pickup_and_return'],true)) {
+        $servStmt = $conn->prepare("
+            INSERT INTO service (booking_id, service_type, fee, staff_id, status, delivery_location, return_location)
+            VALUES (?,?,?,?,?,?,?)
+        ");
+        $fee = null; $staff_id = null; $serv_status = 'pending';
+        $servStmt->bind_param(
+            "isdisss",
+            $booking_id,
+            $delivery_type,
+            $fee,
+            $staff_id,
+            $serv_status,
+            $delivery_location,
+            $return_location
+        );
+        $servStmt->execute();
+        if ($servStmt->error) throw new Exception("Service insert error: ".$servStmt->error);
+        $servStmt->close();
+    }
+
+    $aStmt = $conn->prepare("
+        INSERT INTO agreement_form (booking_id, cust_id, guarantor_id, agreement_file_path, cust_signature)
+        VALUES (?,?,?,?,?)
+    ");
+    $pdf_for_bind = $pdf_binary;
+    $sig_for_bind = $signature_binary;
+    $aStmt->bind_param("iiibb",
+        $booking_id,
+        $cust_id,
+        $guarantor_id,
+        $pdf_for_bind,
+        $sig_for_bind
+    );
+    if ($pdf_binary !== null)      $aStmt->send_long_data(3, $pdf_binary);
+    if ($signature_binary !== null)$aStmt->send_long_data(4, $signature_binary);
+    $aStmt->execute();
+    if ($aStmt->error) throw new Exception("Agreement insert error: ".$aStmt->error);
+    $agreement_id = $aStmt->insert_id;
+    $aStmt->close();
+
+    $conn->commit();
+} catch(Throwable $e) {
+    $conn->rollback();
+    die("Booking submission failed: ".$e->getMessage());
 }
 
-// Guarantor section
-$pdf->SetFont('helvetica', '', 10);
-$pdf->MultiCell(0, 7, "Guarantor Name: {$guarantor['guarantor_full_name']}", 0, 'L');
-$pdf->MultiCell(0, 7, "Guarantor Phone: {$guarantor['guarantor_phone_no']}", 0, 'L');
-$pdf->MultiCell(0, 7, "Guarantor ID No: {$guarantor['guarantor_id_no']}", 0, 'L');
-
-// Guarantor ID Images
-$pdf->SetFont('helvetica', 'B', 10);
-$pdf->MultiCell(0, 7, "Guarantor ID Images (Front & Back):", 0, 'L');
-$pdf->SetFont('helvetica', '', 10);
-if (!empty($guar_id_front_path) && file_exists($guar_id_front_path)) {
-    $pdf->Image($guar_id_front_path, $pdf->GetX(), $pdf->GetY(), 60, 35, '', '', '', false, 300);
-    $pdf->Ln(37);
-} else {
-    $pdf->MultiCell(0, 7, "Front ID not available.", 0, 'L');
+/* Cleanup temp guarantor upload files */
+if (!empty($guarSession['guarantor_id_front']) && file_exists($guarSession['guarantor_id_front'])) {
+    @unlink($guarSession['guarantor_id_front']);
 }
-if (!empty($guar_id_back_path) && file_exists($guar_id_back_path)) {
-    $pdf->Image($guar_id_back_path, $pdf->GetX(), $pdf->GetY(), 60, 35, '', '', '', false, 300);
-    $pdf->Ln(37);
-} else {
-    $pdf->MultiCell(0, 7, "Back ID not available.", 0, 'L');
+if (!empty($guarSession['guarantor_id_back']) && file_exists($guarSession['guarantor_id_back'])) {
+    @unlink($guarSession['guarantor_id_back']);
 }
 
-// Signature
-$pdf->Ln(7);
-$pdf->SetFont('helvetica', 'B', 11);
-$pdf->MultiCell(0, 7, "Driver Signature:", 0, 'L');
-$pdf->Image($signature_path, $pdf->GetX(), $pdf->GetY(), 60, 30, 'PNG');
-$pdf->Ln(35);
-
-// Save PDF
-$pdf_dir = $_SERVER['DOCUMENT_ROOT'] . '/uploads/agreements/';
-if (!is_dir($pdf_dir)) mkdir($pdf_dir, 0777, true);
-$relative_path = '/uploads/agreements/' . uniqid('agreement_') . '.pdf';
-$pdf_path = $_SERVER['DOCUMENT_ROOT'] . $relative_path;
-$pdf->Output($pdf_path, 'F');
-if (!file_exists($pdf_path)) {
-    die('PDF was not created: ' . $pdf_path);
-}
-
-// 14. Insert into agreement_form (store PDF and signature as LONGBLOB)
-$admin_id = null; // NULL at this stage
-$agreement_file = file_get_contents($pdf_path);
-
-$stmt5 = $conn->prepare("INSERT INTO agreement_form (booking_id, customer_id, guarantor_id, admin_id, agreement_file_path, cust_signature) VALUES (?, ?, ?, ?, ?, ?)");
-$stmt5->bind_param("iiiibb", $booking_id, $cust_id, $guarantor_id, $admin_id, $agreement_file, $signature_binary);
-if ($agreement_file !== null) $stmt5->send_long_data(4, $agreement_file);
-if ($signature_binary !== null) $stmt5->send_long_data(5, $signature_binary);
-$stmt5->execute();
-if ($stmt5->error) {
-    die('Agreement form insert error: ' . $stmt5->error);
-}
-$agreement_id = $stmt5->insert_id;
-$stmt5->close();
-
-// 15. Unset sessions
-unset($_SESSION['booking_data'], $_SESSION['driver_data'], $_SESSION['guarantor_data']);
-
-// 16. Clean up temp image files (avoid deleting if original, only temp files)
-if (isset($driver['driver_id_front']) && strpos($driver['driver_id_front'], sys_get_temp_dir()) === 0) @unlink($driver['driver_id_front']);
-if (isset($driver['driver_id_back']) && strpos($driver['driver_id_back'], sys_get_temp_dir()) === 0) @unlink($driver['driver_id_back']);
-if (isset($guarantor['guarantor_id_front']) && strpos($guarantor['guarantor_id_front'], sys_get_temp_dir()) === 0) @unlink($guarantor['guarantor_id_front']);
-if (isset($guarantor['guarantor_id_back']) && strpos($guarantor['guarantor_id_back'], sys_get_temp_dir()) === 0) @unlink($guarantor['guarantor_id_back']);
-@unlink($driver_id_front_path);
-@unlink($driver_id_back_path);
-@unlink($guar_id_front_path);
-@unlink($guar_id_back_path);
-@unlink($signature_path);
-@unlink($pdf_path);
+unset($_SESSION['booking_data'], $_SESSION['guarantor_data']);
 ?>
-
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Booking Submitted | Timeless Car Rental</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <link rel="stylesheet" href="/assets/css/style.css">
 <style>
+body { background:#eceef4; }
 .confirmation-container {
-    max-width: 600px;
-    margin: 60px auto;
-    background: #fff;
-    border-radius: 13px;
-    box-shadow: 0 4px 16px rgba(44,60,102,0.09);
-    padding: 36px 42px 30px 42px;
-    text-align: center;
+    max-width:640px; margin:60px auto 90px; background:#fff;
+    border-radius:14px; box-shadow:0 4px 18px rgba(40,55,95,0.10);
+    padding:40px 48px 44px; text-align:center;
 }
-.next-btn {
-    background: #3c4cb8;
-    color: #fff;
-    border: none;
-    padding: 12px 30px;
-    border-radius: 7px;
-    font-size: 1.08em;
-    font-weight: 600;
-    cursor: pointer;
-    transition: background 0.18s;
-    margin-top: 26px;
+.confirmation-container h2 { margin:0 0 12px; font-size:1.65em; color:#2f377d; }
+.subline { font-size:.92em; color:#526081; margin-bottom:26px; line-height:1.4em; }
+.summary-table { width:100%; border-collapse:collapse; margin:0 0 16px; }
+.summary-table th, .summary-table td { padding:8px 10px; font-size:.95em; }
+.summary-table th {
+    text-align:left; color:#32405f; font-weight:600; background:#f5f7fb;
+    border-right:1px solid #e1e6f0; width:55%;
 }
-.next-btn:hover {background: #234c96;}
+.summary-table td { text-align:right; background:#fafbfe; color:#243040; }
+.total-row td {
+    font-weight:700; font-size:1.05em; color:#1f317a;
+    border-top:2px solid #c9d2e8; background:#f1f4fb;
+}
+.pending-fee { color:#b36a08; font-weight:600; }
+.note { font-size:.78em; color:#6a7387; margin-top:12px; }
+.action-links a {
+    display:inline-block; margin:12px 8px 0; text-decoration:none;
+    background:#3c4cb8; color:#fff; padding:12px 26px; border-radius:8px;
+    font-size:.9em; font-weight:600; transition:.18s;
+}
+.action-links a:hover { background:#234c96; }
+.back-link { background:#d1d5de !important; color:#222 !important; }
+.back-link:hover { background:#bfc5ce !important; }
 </style>
+</head>
+<body>
+<?php include '../includes/header.php'; ?>
 
 <div class="confirmation-container">
-    <h2>Booking Submitted!</h2>
-    <p>Your booking and agreement have been recorded.<br>
-    Please proceed to payment to confirm your reservation.</p>
-    <table class="review-table" style="margin: 0 auto 18px auto; font-size:1.1em;">
-        <tr>
-            <th style="text-align:left;">Subtotal</th>
-            <td style="text-align:right;">RM <?= number_format($subtotal,2) ?></td>
-        </tr>
-        <tr>
-            <th style="text-align:left;">Delivery Fee</th>
-            <td style="text-align:right;">RM <?= number_format($delivery_fee,2) ?></td>
-        </tr>
-        <tr>
-            <th style="text-align:left;">Security Deposit</th>
-            <td style="text-align:right;">RM <?= number_format($security_deposit,2) ?></td>
-        </tr>
-        <tr>
-            <th style="text-align:left;">Total Amount</th>
-            <td style="text-align:right; font-weight:bold; color:#203090;">RM <?= number_format($total_price,2) ?></td>
-        </tr>
+    <h2>Booking Submitted</h2>
+    <div class="subline">
+        Booking ID: <?= htmlspecialchars($booking_id) ?> stored (status: <strong><?= htmlspecialchars($status) ?></strong>).<br>
+        <?php if (in_array($delivery_type,['delivery','pickup_and_return'])): ?>
+            Delivery fee is <span class="pending-fee">pending</span>.
+        <?php endif; ?>
+    </div>
+    <table class="summary-table">
+        <tr><th>Car</th><td><?= htmlspecialchars($car['car_brand'].' '.$car['car_model']) ?></td></tr>
+        <tr><th>Pickup</th><td><?= htmlspecialchars($pickupDT->format('Y-m-d H:i')) ?></td></tr>
+        <tr><th>Return</th><td><?= htmlspecialchars($returnDT->format('Y-m-d H:i')) ?></td></tr>
+        <tr><th>Duration (days)</th><td><?= $days ?></td></tr>
+        <tr><th>Daily Rate</th><td>RM <?= number_format($daily_rate,2) ?></td></tr>
+        <tr><th>Rental Subtotal</th><td>RM <?= number_format($rental_subtotal,2) ?></td></tr>
+        <tr><th>Security Deposit</th><td>RM <?= number_format($security_deposit,2) ?></td></tr>
+        <?php if (in_array($delivery_type,['delivery','pickup_and_return'])): ?>
+            <tr><th>Delivery Fee</th><td class="pending-fee">Pending</td></tr>
+            <tr class="total-row"><td colspan="2">Provisional Total (Excl Delivery): RM <?= number_format($provisional_total,2) ?></td></tr>
+        <?php else: ?>
+            <tr class="total-row"><td colspan="2">Total Payable: RM <?= number_format($provisional_total,2) ?></td></tr>
+        <?php endif; ?>
     </table>
-    <p style="margin-top:18px; color:#3c4cb8;">
-        Your booking is pending admin approval.<br>
-        You will be notified when it is approved and can proceed to payment at that time.
-    </p>
-    <p style="margin-top:18px;">
-        <a href="download_agreement.php?id=<?= $agreement_id ?>" target="_blank">Download Agreement PDF</a>
-    </p>
+    <div class="note">
+        Agreement PDF (with your images, guarantor images and signature) is stored.
+    </div>
+    <div class="action-links">
+        <a href="dashboard.php" class="back-link">Dashboard</a>
+        <a href="download_agreement.php?id=<?= (int)$agreement_id ?>" target="_blank">View Agreement PDF</a>
+    </div>
 </div>
 
 <?php include '../includes/footer.php'; ?>
+</body>
+</html>
