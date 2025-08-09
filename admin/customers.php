@@ -1,187 +1,206 @@
 <?php
+session_start();
 include '../connect.php';
 
-session_start();
-
-if (!isset($_SESSION['admin_id'])) {
+if (empty($_SESSION['admin_id'])) {
     header("Location: admin_login.php");
     exit;
 }
 
-// Handle search filter
-$search = '';
+date_default_timezone_set('Asia/Kuala_Lumpur');
+
+$search  = trim($_GET['search'] ?? '');
+$page    = isset($_GET['page']) && ctype_digit($_GET['page']) && (int)$_GET['page']>0 ? (int)$_GET['page'] : 1;
+$perPage = 25;
+$offset  = ($page-1)*$perPage;
+
+function esc($v){ return htmlspecialchars((string)$v,ENT_QUOTES,'UTF-8'); }
+
 $where = '';
-if (isset($_GET['search']) && trim($_GET['search']) !== '') {
-    $search = trim($_GET['search']);
-    $safe_search = $conn->real_escape_string($search);
-    $where = "WHERE 
-        full_name     LIKE '%$safe_search%' OR 
-        username      LIKE '%$safe_search%' OR 
-        phone_no      LIKE '%$safe_search%' OR 
-        age           LIKE '%$safe_search%' OR
-        email         LIKE '%$safe_search%' OR
-        address       LIKE '%$safe_search%'";
+$params = [];
+$types  = '';
+if ($search !== '') {
+    $like = "%$search%";
+    $where = "WHERE (full_name LIKE ? OR username LIKE ? OR phone_no LIKE ? OR email LIKE ? OR address LIKE ? OR CAST(age AS CHAR) LIKE ?)";
+    $params = [$like,$like,$like,$like,$like,$like];
+    $types  = 'ssssss';
 }
 
-// Fetch customers
-$customers = [];
-$sql = "SELECT * FROM customer $where ORDER BY cust_id DESC";
-$result = $conn->query($sql);
-while ($row = $result->fetch_assoc()) {
-    $customers[] = $row;
+$totalAll = (int)$conn->query("SELECT COUNT(*) c FROM customer")->fetch_assoc()['c'];
+if ($where) {
+    $stmt = $conn->prepare("SELECT COUNT(*) c FROM customer $where");
+    $stmt->bind_param($types, ...$params);
+    $stmt->execute();
+    $stmt->bind_result($filtered);
+    $stmt->fetch();
+    $stmt->close();
+    $totalFiltered = (int)$filtered;
+} else {
+    $totalFiltered = $totalAll;
 }
+
+$totalPages = max(1,(int)ceil($totalFiltered/$perPage));
+
+$listSql = "SELECT cust_id, full_name, phone_no, email, username, profile_status, profile_status_updated_at
+            FROM customer
+            ".($where?:'')."
+            ORDER BY cust_id DESC
+            LIMIT ? OFFSET ?";
+$stmt = $conn->prepare($where
+    ? "$listSql"
+    : "SELECT cust_id, full_name, phone_no, email, username, profile_status, profile_status_updated_at
+       FROM customer ORDER BY cust_id DESC LIMIT ? OFFSET ?");
+if ($where) {
+    $typesList = $types.'ii';
+    $paramsList = array_merge($params,[$perPage,$offset]);
+    $stmt->bind_param($typesList, ...$paramsList);
+} else {
+    $stmt->bind_param('ii',$perPage,$offset);
+}
+$stmt->execute();
+$res = $stmt->get_result();
+$rows = [];
+while ($r=$res->fetch_assoc()) $rows[]=$r;
+$stmt->close();
+
+$statusLabels = [
+    'unsubmitted'=>'Not Submitted',
+    'pending'=>'Pending',
+    'verified'=>'Verified',
+    'rejected'=>'Rejected',
+    'pending_reverification'=>'Pending Re-Verification'
+];
+function badgeClass($s){
+    return match($s){
+        'verified'=>'badge-ok',
+        'pending','pending_reverification'=>'badge-warn',
+        'rejected'=>'badge-error',
+        default=>'badge-neutral'
+    };
+}
+
+include 'admin_header.php';
 ?>
-
-<?php include 'admin_header.php'; ?>
-
 <style>
-.customer-search-bar {
-    display: flex;
-    gap: 8px;
-    margin-bottom: 18px;
-    align-items: center;
-}
-.customer-search-bar input[type=text] {
-    padding: 9px 14px;
-    border-radius: 7px;
-    border: 1.5px solid #b5bee5;
-    font-size: 1.05em;
-    background: #f7fafd;
-    width: 280px;
-    max-width: 50vw;
-}
-.customer-search-bar button {
-    padding: 9px 19px;
-    background: #2b5cbc;
-    color: #fff;
-    border: none;
-    border-radius: 7px;
-    font-weight: 600;
-    font-size: 1.03em;
-    cursor: pointer;
-    transition: background 0.14s;
-}
-.customer-search-bar button:hover {
-    background: #243570;
-}
-.customer-table {
-    width: 100%;
-    border-collapse: collapse;
-    margin: 18px 0 40px 0;
-    background: #fff;
-    box-shadow: 0 2px 12px #e0e7ef55;
-    border-radius: 12px;
-    overflow: hidden;
-}
-.customer-table th, .customer-table td {
-    padding: 13px 14px;
-    border-bottom: 1px solid #eef2fa;
-    text-align: left;
-}
-.customer-table th {
-    background: #f8fafd;
-    font-weight: 700;
-    color: #2b5cbc;
-    letter-spacing: 0.5px;
-}
-.customer-table tr:last-child td {
-    border-bottom: none;
-}
-.edit-btn {
-    background: #eaf1fa;
-    color: #2b5cbc;
-    padding: 6px 14px;
-    border-radius: 7px;
-    text-decoration: none;
-    font-size: 1em;
-    font-weight: 600;
-    transition: background 0.13s, color 0.13s;
-    border: none;
-    cursor: pointer;
-    display: inline-block;
-}
-.edit-btn:hover {
-    background: #d2ebfd;
-    color: #18447c;
-}
-.back-btn {
-    background: #ccc;
-    color: #222;
-    border: none;
-    padding: 12px 30px;
-    border-radius: 7px;
-    font-size: 1.08em;
-    font-weight: 600;
-    cursor: pointer;
-    transition: background 0.18s;
-    margin-bottom: 20px;
-    display: inline-block;
-}
-.back-btn:hover {background: #bbb;}
-@media (max-width: 900px) {
-    .customer-table th, .customer-table td { font-size: 0.97em; padding: 8px 6px; }
-    .customer-search-bar input[type=text] { width: 120px; }
-}
-.customers-breadcrumb {
-    font-size: 1em;
-    color: #92a2b3;
-    margin-bottom: 10px;
-}
-.customers-breadcrumb a {
-    color: #6d87be;
-    text-decoration: none;
-    font-weight: 600;
+.customers-wrapper{max-width:1200px;margin:38px auto 60px;padding:0 16px;}
+.customers-breadcrumb{font-size:.9rem;color:#92a2b3;margin-bottom:10px;}
+.customers-breadcrumb a{color:#6d87be;text-decoration:none;font-weight:600;}
+.customer-search-bar{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0 10px;align-items:center;}
+.customer-search-bar input{padding:9px 14px;border:1.5px solid #b5bee5;border-radius:7px;background:#f7fafd;font-size:.95rem;width:320px;max-width:70vw;}
+.customer-search-bar button{padding:9px 18px;background:#2b5cbc;color:#fff;font-weight:600;border:none;border-radius:7px;cursor:pointer;font-size:.9rem;}
+.customer-search-bar button:hover{background:#243570;}
+.clear-link{color:#888;font-size:.75rem;text-decoration:none;}
+.clear-link:hover{text-decoration:underline;}
+.customer-table{width:100%;border-collapse:collapse;margin:18px 0 30px;background:#fff;box-shadow:0 2px 12px #e0e7ef55;border-radius:14px;overflow:hidden;font-size:.8rem;}
+.customer-table th,.customer-table td{padding:12px 14px;border-bottom:1px solid #eef2fa;text-align:left;}
+.customer-table th{background:#f8fafd;font-weight:700;color:#2b5cbc;letter-spacing:.5px;font-size:.68rem;text-transform:uppercase;}
+.customer-table tr:last-child td{border-bottom:none;}
+.view-btn{background:#eaf1fa;color:#2b5cbc;padding:6px 12px;border-radius:7px;text-decoration:none;font-weight:600;font-size:.65rem;display:inline-block;}
+.view-btn:hover{background:#d2ebfd;color:#1a4d7d;}
+.badge{display:inline-block;padding:4px 10px;font-size:.6rem;border-radius:14px;font-weight:600;letter-spacing:.4px;}
+.badge-ok{background:#e4f8ea;color:#1c6a34;}
+.badge-warn{background:#fff7db;color:#7a5d00;}
+.badge-error{background:#ffe2e2;color:#902121;}
+.badge-neutral{background:#e7ebf2;color:#33415c;}
+.count-summary{font-size:.7rem;color:#607086;margin-top:4px;}
+.pagination{display:flex;flex-wrap:wrap;gap:6px;padding:6px 0 12px;}
+.pagination a,.pagination span{display:inline-block;padding:6px 10px;border-radius:7px;text-decoration:none;font-size:.64rem;font-weight:600;background:#fff;border:1px solid #d5dceb;color:#2b5cbc;}
+.pagination a:hover{background:#2b5cbc;color:#fff;}
+.pagination .active{background:#2b5cbc;color:#fff;border-color:#2b5cbc;}
+.pagination .disabled{opacity:.4;cursor:not-allowed;background:#f4f6fa;color:#9aa9c5;}
+@media (max-width:760px){
+  .customer-table th:nth-child(n+6),.customer-table td:nth-child(n+6){display:none;}
+  .customer-search-bar input{width:200px;}
 }
 </style>
 
-<div style="max-width:1120px;margin:38px auto 25px auto;">
-    <div class="customers-breadcrumb" style="font-size:1em;color:#92a2b3;margin-bottom:10px;">
-        <a href="admin_dashboard.php" style="color:#6d87be;text-decoration:none;font-weight:600;">Dashboard</a> / Customers
-    </div>
-    <h2 style="color:#2b5cbc;font-weight:800;letter-spacing:1px;">Customers</h2>
-    <form class="customer-search-bar" method="get" action="customers.php" autocomplete="off">
-        <input type="text" name="search" placeholder="Search name, username, phone, email, address or age..." value="<?= htmlspecialchars($search) ?>">
-        <button type="submit">Search</button>
-        <?php if ($search): ?>
-            <a href="customers.php" style="margin-left:15px;color:#888;font-size:0.98em;">Clear</a>
-        <?php endif; ?>
-    </form>
-    <div style="overflow-x:auto;">
+<div class="customers-wrapper">
+  <div class="customers-breadcrumb">
+    <a href="admin_dashboard.php">Dashboard</a> / Customers
+  </div>
+  <h2 style="color:#2b5cbc;font-weight:800;letter-spacing:1px;margin:0 0 8px;">Customers</h2>
+
+  <form class="customer-search-bar" method="get" action="customers.php">
+    <input type="text" name="search" placeholder="Search name, username, phone, email, address or age..." value="<?= esc($search) ?>">
+    <button type="submit">Search</button>
+    <?php if($search!==''): ?><a href="customers.php" class="clear-link">Clear</a><?php endif; ?>
+  </form>
+
+  <div class="count-summary">
+    <?php if ($search!==''): ?>
+      Showing <?= count($rows) ?> of <?= $totalFiltered ?> match(es). Total customers: <?= $totalAll ?>.
+    <?php else: ?>
+      Showing <?= count($rows) ?> (page <?= $page ?> of <?= $totalPages ?>). Total customers: <?= $totalAll ?>.
+    <?php endif; ?>
+  </div>
+
+  <div style="overflow-x:auto;">
     <table class="customer-table">
-        <thead>
-            <tr>
-                <th>#</th>
-                <th>Name</th>
-                <th>Phone</th>
-                <th>Email</th>
-                <th>Username</th>
-                <th>Address</th>
-                <th>Age</th>
-                <th>Edit</th>
-            </tr>
-        </thead>
-        <tbody>
-            <?php if (empty($customers)): ?>
-                <tr><td colspan="8" style="text-align:center;color:#888;">No customers found.</td></tr>
-            <?php else: ?>
-                <?php foreach ($customers as $i => $cust): ?>
-                    <tr>
-                        <td><?= $i+1 ?></td>
-                        <td><?= htmlspecialchars($cust['full_name']) ?></td>
-                        <td><?= htmlspecialchars($cust['phone_no']) ?></td>
-                        <td><?= htmlspecialchars($cust['email']) ?></td>
-                        <td><?= htmlspecialchars($cust['username']) ?></td>
-                        <td><?= htmlspecialchars($cust['address']) ?></td>
-                        <td><?= htmlspecialchars($cust['age']) ?></td>
-                        <td>
-                            <a href="edit_customer.php?id=<?= $cust['cust_id'] ?>" class="edit-btn">Edit</a>
-                        </td>
-                    </tr>
-                <?php endforeach; ?>
-            <?php endif; ?>
-        </tbody>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Full Name</th>
+          <th>Username</th>
+          <th>Email</th>
+          <th>Phone</th>
+          <th>Status</th>
+          <th>Updated</th>
+          <th>View</th>
+        </tr>
+      </thead>
+      <tbody>
+      <?php if(!$rows): ?>
+        <tr><td colspan="8" style="text-align:center;color:#888;">No customers found.</td></tr>
+      <?php else: foreach ($rows as $i=>$c):
+          $status = $c['profile_status'] ?? 'unsubmitted';
+      ?>
+        <tr>
+          <td><?= esc($offset+$i+1) ?></td>
+            <td><?= esc($c['full_name']) ?></td>
+            <td><?= esc($c['username']) ?></td>
+            <td><?= esc($c['email']) ?></td>
+            <td><?= esc($c['phone_no']) ?></td>
+            <td><span class="badge <?= badgeClass($status) ?>"><?= esc($statusLabels[$status] ?? $status) ?></span></td>
+            <td style="font-size:.6rem;"><?= esc($c['profile_status_updated_at'] ?? '') ?></td>
+            <td><a class="view-btn" href="admin_customer_view.php?cust_id=<?= (int)$c['cust_id'] ?>">View</a></td>
+        </tr>
+      <?php endforeach; endif; ?>
+      </tbody>
     </table>
+  </div>
+
+  <?php if ($totalPages>1): ?>
+    <div class="pagination">
+      <?php
+      $qs = $search!=='' ? '&search='.urlencode($search) : '';
+      $prev = max(1,$page-1);
+      $next = min($totalPages,$page+1);
+      ?>
+      <?php if($page>1): ?>
+        <a href="customers.php?page=<?= $prev . $qs ?>">&laquo;</a>
+      <?php else: ?><span class="disabled">&laquo;</span><?php endif; ?>
+      <?php
+        $window=3;
+        $start=max(1,$page-$window);
+        $end=min($totalPages,$page+$window);
+        if($start>1){
+            echo '<a href="customers.php?page=1'.$qs.'">1</a>';
+            if($start>2) echo '<span class="disabled">…</span>';
+        }
+        for($p=$start;$p<=$end;$p++){
+            if($p==$page) echo '<span class="active">'.$p.'</span>';
+            else echo '<a href="customers.php?page='.$p.$qs.'">'.$p.'</a>';
+        }
+        if($end<$totalPages){
+            if($end<$totalPages-1) echo '<span class="disabled">…</span>';
+            echo '<a href="customers.php?page='.$totalPages.$qs.'">'.$totalPages.'</a>';
+        }
+      ?>
+      <?php if($page<$totalPages): ?>
+        <a href="customers.php?page=<?= $next . $qs ?>">&raquo;</a>
+      <?php else: ?><span class="disabled">&raquo;</span><?php endif; ?>
     </div>
+  <?php endif; ?>
 </div>
 
 <?php include '../includes/footer.php'; ?>

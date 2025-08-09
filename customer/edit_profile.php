@@ -15,8 +15,13 @@ $error            = '';
 $info_lock        = '';
 $statusNote       = '';
 $statusDowngraded = false;
+$updatedImages    = [];
 
-/* ---------- Helper: Detect MIME (works without fileinfo) ---------- */
+/* CONFIG */
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const ALLOW_EDIT_WHILE_REVERIFY = false;
+
+/* ---------- Helper: Detect MIME ---------- */
 function detectMimeType(string $path): string {
     if (function_exists('mime_content_type')) {
         $m = @mime_content_type($path);
@@ -47,11 +52,14 @@ function detectMimeType(string $path): string {
         if (!empty($info['mime'])) return $info['mime'];
     }
     $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
-    $extMap = [
-        'jpg'=>'image/jpeg','jpeg'=>'image/jpeg','png'=>'image/png',
-        'gif'=>'image/gif','webp'=>'image/webp','bmp'=>'image/bmp'
-    ];
-    return $extMap[$ext] ?? 'application/octet-stream';
+    return match($ext) {
+        'jpg','jpeg' => 'image/jpeg',
+        'png'        => 'image/png',
+        'gif'        => 'image/gif',
+        'webp'       => 'image/webp',
+        'bmp'        => 'image/bmp',
+        default      => 'application/octet-stream',
+    };
 }
 
 /* ---------- Formatting Helpers ---------- */
@@ -73,7 +81,7 @@ function format_phone_display(?string $digits): string {
 $stmt = $conn->prepare(
     "SELECT full_name, phone_no, email, username, id_no,
             id_front_image, id_back_image, license_front_image, license_back_image,
-            address, age, profile_status
+            address, age, profile_status, images_version
      FROM customer
      WHERE cust_id=? LIMIT 1"
 );
@@ -90,8 +98,10 @@ if (!$originalUser) {
 }
 
 $originalStatus         = $originalUser['profile_status'];
+$currentImagesVersion   = (int)$originalUser['images_version'];
 $locked_statuses        = ['pending','pending_reverification'];
-$initial_profile_locked = in_array($originalStatus, $locked_statuses, true);
+$initial_profile_locked = in_array($originalStatus, $locked_statuses, true)
+    && !(ALLOW_EDIT_WHILE_REVERIFY && $originalStatus === 'pending_reverification');
 
 /* ---------- Process POST (only if not initially locked) ---------- */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$initial_profile_locked) {
@@ -164,7 +174,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$initial_profile_locked) {
         }
 
         // Detect critical changes (trigger re-verification if verified)
-        $criticalFieldNames = ['full_name','id_no']; // extend if needed
+        $criticalFieldNames = ['full_name','id_no'];
         $criticalChanged = false;
         foreach ($criticalFieldNames as $cf) {
             $oldVal = $originalUser[$cf];
@@ -176,9 +186,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$initial_profile_locked) {
         }
 
         // Handle images + detect if any replaced (critical)
-        $blobIndexes = [];
         $ALLOWED = ['image/jpeg','image/png','image/webp','image/gif'];
-        $MAX = 5 * 1024 * 1024;
         $imageInputs = [
             'id_front_image'      => 'id_front_image',
             'id_back_image'       => 'id_back_image',
@@ -187,55 +195,85 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$initial_profile_locked) {
         ];
 
         foreach ($imageInputs as $input => $col) {
-            if (isset($_FILES[$input]) && $_FILES[$input]['error'] === UPLOAD_ERR_OK) {
-                $tmp  = $_FILES[$input]['tmp_name'];
-                $size = @filesize($tmp);
-                if ($size === false || $size <= 0) { $error = "Failed to read $input."; break; }
-                if ($size > $MAX) { $error = "$input exceeds 5MB limit."; break; }
-                $mime = detectMimeType($tmp);
-                if (!in_array($mime, $ALLOWED, true)) { $error = "$input unsupported type ($mime)."; break; }
-                $blob = @file_get_contents($tmp);
-                if ($blob === false) { $error = "Could not read $input."; break; }
-                $sets[] = "$col=?";
-                $types .= 's';
-                $params[] = $blob;
-                $blobIndexes[] = count($params)-1;
-                $criticalChanged = true; // any new identity/license image triggers re-verification
+            if (!isset($_FILES[$input]) || $_FILES[$input]['error'] === UPLOAD_ERR_NO_FILE) {
+                continue;
             }
+            $errCode = $_FILES[$input]['error'];
+            if ($errCode !== UPLOAD_ERR_OK) {
+                $error = match($errCode) {
+                    UPLOAD_ERR_INI_SIZE   => "$input exceeds server upload_max_filesize.",
+                    UPLOAD_ERR_FORM_SIZE  => "$input exceeds MAX_FILE_SIZE form limit.",
+                    UPLOAD_ERR_PARTIAL    => "$input partially uploaded.",
+                    UPLOAD_ERR_NO_TMP_DIR => "Missing temp folder for $input.",
+                    UPLOAD_ERR_CANT_WRITE => "Failed to write $input to disk.",
+                    UPLOAD_ERR_EXTENSION  => "PHP extension stopped $input upload.",
+                    default               => "Unknown upload error ($errCode) for $input."
+                };
+                break;
+            }
+            $tmp  = $_FILES[$input]['tmp_name'];
+            $size = @filesize($tmp);
+            if ($size === false || $size <= 0) {
+                $error = "Failed to read $input.";
+                break;
+            }
+            if ($size > MAX_IMAGE_BYTES) {
+                $error = "$input exceeds " . (MAX_IMAGE_BYTES/1024/1024) . "MB limit.";
+                break;
+            }
+            $mime = detectMimeType($tmp);
+            if (!in_array($mime, $ALLOWED, true)) {
+                $error = "$input unsupported type ($mime).";
+                break;
+            }
+            $blob = @file_get_contents($tmp);
+            if ($blob === false) {
+                $error = "Could not read $input.";
+                break;
+            }
+            $sets[] = "$col=?";
+            $types .= 's';
+            $params[] = $blob;
+            $criticalChanged = true;
+            $updatedImages[] = $input;
         }
 
         if (!$error) {
+            // Version bump only if any image changed
+            if ($updatedImages) {
+                $sets[] = "images_version = images_version + 1";
+                $sets[] = "images_updated_at = NOW()";
+            }
+
             if ($originalStatus === 'verified' && $criticalChanged) {
                 $sets[] = "profile_status='pending_reverification'";
                 $sets[] = "profile_status_updated_at=NOW()";
                 $statusDowngraded = true;
             }
 
-            $sets_sql = implode(', ', $sets);
-            $sql = "UPDATE customer SET $sets_sql WHERE cust_id=?";
-            $types .= 'i';
-            $params[] = $cust_id;
-
-            $stmt = $conn->prepare($sql);
-            if ($stmt) {
-                $bind = [];
-                $bind[] = $types;
-                foreach ($params as $i => $v) { $bind[] = &$params[$i]; }
-                call_user_func_array([$stmt,'bind_param'],$bind);
-                foreach ($blobIndexes as $i) {
-                    $stmt->send_long_data($i, $params[$i]);
-                }
-                if ($stmt->execute()) {
-                    $success = true;
-                    if ($statusDowngraded) {
-                        $statusNote = "Critical changes detected. Profile sent for re-verification.";
-                    }
-                } else {
-                    $error = "Update failed: ".$stmt->error;
-                }
-                $stmt->close();
+            if (!$sets) {
+                $error = "No changes detected.";
             } else {
-                $error = "Prepare failed: ".$conn->error;
+                $sets_sql = implode(', ', $sets);
+                $sql = "UPDATE customer SET $sets_sql WHERE cust_id=?";
+                $types .= 'i';
+                $params[] = $cust_id;
+
+                $stmt = $conn->prepare($sql);
+                if ($stmt) {
+                    $bind = [];
+                    $bind[] = $types;
+                    foreach ($params as $i => $v) { $bind[] = &$params[$i]; }
+                    call_user_func_array([$stmt,'bind_param'],$bind);
+                    if ($stmt->execute()) {
+                        $success = true;
+                    } else {
+                        $error = "Update failed: ".$stmt->error;
+                    }
+                    $stmt->close();
+                } else {
+                    $error = "Prepare failed: ".$conn->error;
+                }
             }
         }
     }
@@ -244,7 +282,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$initial_profile_locked) {
     $stmt = $conn->prepare(
         "SELECT full_name, phone_no, email, username, id_no,
                 id_front_image, id_back_image, license_front_image, license_back_image,
-                address, age, profile_status
+                address, age, profile_status, images_version
          FROM customer WHERE cust_id=? LIMIT 1"
     );
     $stmt->bind_param("i",$cust_id);
@@ -254,6 +292,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$initial_profile_locked) {
     $stmt->close();
     if ($newUser) {
         $originalUser = $newUser;
+        $currentImagesVersion = (int)$originalUser['images_version'];
     }
 } elseif ($_SERVER['REQUEST_METHOD'] === 'POST' && $initial_profile_locked) {
     $error = "Profile is locked during review. No changes applied.";
@@ -261,7 +300,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$initial_profile_locked) {
 
 /* ---------- Final lock state after potential downgrade ---------- */
 $currentStatus  = $originalUser['profile_status'];
-$profile_locked = in_array($currentStatus, $locked_statuses, true);
+$profile_locked = in_array($currentStatus, $locked_statuses, true)
+    && !(ALLOW_EDIT_WHILE_REVERIFY && $currentStatus === 'pending_reverification');
 if ($profile_locked) {
     $info_lock = ($currentStatus === 'pending')
         ? 'Your profile is under verification review. Editing is disabled until a decision is made.'
@@ -273,8 +313,11 @@ $display_phone = format_phone_display($originalUser['phone_no']);
 $display_id    = format_nric_display($originalUser['id_no']);
 
 function lockAttr(bool $locked): string {
-    return $locked ? 'disabled style="background:#eef0f3;cursor:not-allowed;"' : '';
+    return $locked ? 'disabled style=\"background:#eef0f3;cursor:not-allowed;\"' : '';
 }
+
+// Cache buster = images_version
+$imgBust = '&v=' . $currentImagesVersion;
 ?>
 <link rel="stylesheet" href="/assets/css/style.css">
 <style>
@@ -319,11 +362,15 @@ function lockAttr(bool $locked): string {
         </div>
     <?php endif; ?>
 
-    <?php if ($success): ?>
-        <div class="success-msg">Profile updated successfully!</div>
+    <?php if ($success && !$error): ?>
+        <div class="success-msg">
+            Profile updated successfully!
+            <?php if ($updatedImages): ?><br><span style="font-size:.8em;">Images updated: <?= htmlspecialchars(implode(', ', $updatedImages)) ?> (version <?= $currentImagesVersion ?>)</span><?php endif; ?>
+            <?php if ($statusDowngraded): ?><div class="status-note" style="margin-top:10px;">Critical changes detected. Profile sent for re-verification.</div><?php endif; ?>
+        </div>
     <?php endif; ?>
-    <?php if ($statusDowngraded && $statusNote): ?>
-        <div class="status-note"><?= htmlspecialchars($statusNote) ?></div>
+    <?php if ($statusDowngraded && !$success && !$error): ?>
+        <div class="status-note">Critical changes detected. Profile sent for re-verification.</div>
     <?php endif; ?>
     <?php if ($error): ?>
         <div class="error-msg"><?= htmlspecialchars($error) ?></div>
@@ -351,7 +398,7 @@ function lockAttr(bool $locked): string {
 
         <hr class="separator">
 
-        <label>Identity & License Documents</label>
+        <label>Identity & License Documents (Version <?= $currentImagesVersion ?>)</label>
         <div class="section-sub">Replacing any document while verified triggers re-verification.</div>
 
         <div class="flex-docs">
@@ -359,7 +406,7 @@ function lockAttr(bool $locked): string {
             <div class="doc-block">
                 <h4>ID Front</h4>
                 <?php if (!empty($originalUser['id_front_image'])): ?>
-                    <img src="get_id_image.php?type=front&cust_id=<?= $cust_id ?>" class="current-img" alt="Current ID Front">
+                    <img src="get_id_image.php?type=front&cust_id=<?= $cust_id . $imgBust ?>" class="current-img" alt="Current ID Front">
                 <?php else: ?>
                     <div style="height:110px;border:1px dashed #bcc6d6;border-radius:8px;display:flex;align-items:center;justify-content:center;background:#fff;font-size:.75em;color:#768099;">No Image</div>
                 <?php endif; ?>
@@ -372,7 +419,7 @@ function lockAttr(bool $locked): string {
             <div class="doc-block">
                 <h4>ID Back</h4>
                 <?php if (!empty($originalUser['id_back_image'])): ?>
-                    <img src="get_id_image.php?type=back&cust_id=<?= $cust_id ?>" class="current-img" alt="Current ID Back">
+                    <img src="get_id_image.php?type=back&cust_id=<?= $cust_id . $imgBust ?>" class="current-img" alt="Current ID Back">
                 <?php else: ?>
                     <div style="height:110px;border:1px dashed #bcc6d6;border-radius:8px;display:flex;align-items:center;justify-content:center;background:#fff;font-size:.75em;color:#768099;">No Image</div>
                 <?php endif; ?>
@@ -385,7 +432,7 @@ function lockAttr(bool $locked): string {
             <div class="doc-block">
                 <h4>License Front</h4>
                 <?php if (!empty($originalUser['license_front_image'])): ?>
-                    <img src="get_id_image.php?type=license_front&cust_id=<?= $cust_id ?>" class="current-img" alt="License Front">
+                    <img src="get_id_image.php?type=license_front&cust_id=<?= $cust_id . $imgBust ?>" class="current-img" alt="License Front">
                 <?php else: ?>
                     <div style="height:110px;border:1px dashed #bcc6d6;border-radius:8px;display:flex;align-items:center;justify-content:center;background:#fff;font-size:.75em;color:#768099;">No Image</div>
                 <?php endif; ?>
@@ -398,7 +445,7 @@ function lockAttr(bool $locked): string {
             <div class="doc-block">
                 <h4>License Back</h4>
                 <?php if (!empty($originalUser['license_back_image'])): ?>
-                    <img src="get_id_image.php?type=license_back&cust_id=<?= $cust_id ?>" class="current-img" alt="License Back">
+                    <img src="get_id_image.php?type=license_back&cust_id=<?= $cust_id . $imgBust ?>" class="current-img" alt="Current License Back">
                 <?php else: ?>
                     <div style="height:110px;border:1px dashed #bcc6d6;border-radius:8px;display:flex;align-items:center;justify-content:center;background:#fff;font-size:.75em;color:#768099;">No Image</div>
                 <?php endif; ?>
@@ -446,14 +493,14 @@ if (phoneInput && !phoneInput.disabled) {
 }
 
 // ---------- Image Preview Logic ----------
-const MAX_BYTES = 5 * 1024 * 1024;
+const MAX_BYTES = <?= MAX_IMAGE_BYTES ?>;
 const ALLOWED   = ['image/jpeg','image/png','image/webp','image/gif'];
 
 function setupPreview(inputId, previewId, msgId){
     const input  = document.getElementById(inputId);
     const img    = document.getElementById(previewId);
     const msg    = document.getElementById(msgId);
-    if (!input || input.disabled) return; // locked or missing
+    if (!input || input.disabled) return;
     input.addEventListener('change', () => {
         if (msg){ msg.style.display='none'; msg.textContent=''; }
         if (img){ img.style.display='none'; img.removeAttribute('src'); }
