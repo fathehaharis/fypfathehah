@@ -1,76 +1,189 @@
 <?php
-ini_set('display_errors', 1);
+declare(strict_types=1);
+/*
+ * booking_details.php (Admin)
+ * Features:
+ *  - Security Deposit Summary (damage deduction & refund integration)
+ *  - Improved Inspection Images (grouping, filtering, modal navigation)
+ *  - Back button links to bookings.php
+ *  - Unified modal gallery (inspection + ID/license/guarantor)
+ *  - Agreement Download button (ALWAYS visible section with clear status)
+ *
+ * This version ensures the "Download Agreement" (or status) always appears.
+ */
+
+ini_set('display_errors', 1); // Disable in production
 ini_set('display_startup_errors', 1);
 error_reporting(E_ALL);
-session_start();
-include '../connect.php';
 
-// Set Malaysia timezone
+session_start();
+require_once '../connect.php';
 date_default_timezone_set('Asia/Kuala_Lumpur');
 
-if (!isset($_SESSION['admin_id'])) {
+if (empty($_SESSION['admin_id'])) {
     header("Location: admin_login.php");
     exit;
 }
 
-if (!isset($_GET['id']) || !is_numeric($_GET['id'])) {
+function e($s): string {
+    return htmlspecialchars((string)($s ?? ''), ENT_QUOTES, 'UTF-8');
+}
+function imgTag(?string $blob, string $alt, string $cls='img-thumb'): string {
+    if ($blob === null || $blob === '') {
+        return '<div class="img-missing">No Image</div>';
+    }
+    return '<img src="data:image/jpeg;base64,'.base64_encode($blob).'" alt="'.e($alt).'" class="'.$cls.'" data-full="data:image/jpeg;base64,'.base64_encode($blob).'" loading="lazy">';
+}
+
+/* CSRF */
+if (empty($_SESSION['csrf_token'])) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
+$csrf_token = $_SESSION['csrf_token'];
+
+/* Booking ID */
+if (!isset($_GET['id']) || !ctype_digit($_GET['id'])) {
     echo "<p>Invalid booking ID.</p>";
     include '../includes/footer.php';
     exit;
 }
+$booking_id = (int)$_GET['id'];
 
-$booking_id = intval($_GET['id']);
+$action_error = null;
 
-// Handle Approve/Reject actions
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['booking_action'])) {
-    $action = $_POST['booking_action'];
-    if ($action === 'approve') {
-        $stmt = $conn->prepare("UPDATE booking SET status = 'approved' WHERE booking_id = ?");
-        $stmt->bind_param("i", $booking_id);
-        $stmt->execute();
-        $stmt->close();
-        $_SESSION['flash_message'] = "Booking approved.";
-        header("Location: booking_details.php?id=" . urlencode($booking_id));
-        exit;
-    } elseif ($action === 'reject' && !empty($_POST['rejection_reason'])) {
-        $rejection_reason = trim($_POST['rejection_reason']);
-        $stmt = $conn->prepare("UPDATE booking SET status = 'rejected', rejection_reason = ? WHERE booking_id = ?");
-        $stmt->bind_param("si", $rejection_reason, $booking_id);
-        $stmt->execute();
-        $stmt->close();
-        $_SESSION['flash_message'] = "Booking rejected.";
-        header("Location: booking_details.php?id=" . urlencode($booking_id));
-        exit;
+/* POST Handling (approve / fee / reject) */
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (!hash_equals($_SESSION['csrf_token'] ?? '', $_POST['csrf_token'] ?? '')) {
+        $action_error = "Invalid session token. Please refresh.";
+    } else {
+        $action = $_POST['booking_action'] ?? '';
+        if (in_array($action, ['save_fee','approve'], true)) {
+
+            $svcSel = $conn->prepare("
+                SELECT service_id
+                FROM service
+                WHERE booking_id=? AND service_type IN ('delivery','pickup_and_return')
+                ORDER BY service_id DESC LIMIT 1
+            ");
+            $svcSel->bind_param('i', $booking_id);
+            $svcSel->execute();
+            $deliveryRow = $svcSel->get_result()->fetch_assoc();
+            $svcSel->close();
+
+            $hasDeliveryType = (bool)$deliveryRow;
+
+            if ($action === 'save_fee') {
+                if (!$hasDeliveryType) {
+                    $action_error = "Cannot save fee: self pickup (no fee).";
+                } else {
+                    $feeRaw = $_POST['service_fee'] ?? '';
+                    if ($feeRaw === '' || !is_numeric($feeRaw)) {
+                        $action_error = "Delivery / pickup fee must be numeric.";
+                    } else {
+                        $fee = number_format((float)$feeRaw, 2, '.', '');
+                        if ((float)$fee < 0) {
+                            $action_error = "Fee cannot be negative.";
+                        } else {
+                            $upd = $conn->prepare("UPDATE service SET fee=? WHERE service_id=?");
+                            $upd->bind_param('di', $fee, $deliveryRow['service_id']);
+                            $upd->execute();
+                            $upd->close();
+                            $_SESSION['flash_message'] = "Service fee saved.";
+                            header("Location: booking_details.php?id=".$booking_id);
+                            exit;
+                        }
+                    }
+                }
+            } elseif ($action === 'approve') {
+                if ($hasDeliveryType) {
+                    $feeRaw = $_POST['service_fee'] ?? '';
+                    if ($feeRaw === '' || !is_numeric($feeRaw)) {
+                        $action_error = "Delivery / pickup fee must be numeric before approval.";
+                    } else {
+                        $fee = number_format((float)$feeRaw, 2, '.', '');
+                        if ((float)$fee < 0) {
+                            $action_error = "Fee cannot be negative.";
+                        } else {
+                            $upd = $conn->prepare("UPDATE service SET fee=? WHERE service_id=?");
+                            $upd->bind_param('di', $fee, $deliveryRow['service_id']);
+                            $upd->execute();
+                            $upd->close();
+                        }
+                    }
+                }
+                if (!$action_error) {
+                    $stmt = $conn->prepare("UPDATE booking SET status='approved', approved_at=NOW() WHERE booking_id=? AND status IN ('pending','waiting_verification')");
+                    $stmt->bind_param('i', $booking_id);
+                    $stmt->execute();
+                    $changed = $stmt->affected_rows;
+                    $stmt->close();
+                    $_SESSION['flash_message'] = $changed
+                        ? "Booking approved (Pending Payment)."
+                        : "Cannot approve: not in pending state.";
+                    header("Location: booking_details.php?id=".$booking_id);
+                    exit;
+                }
+            }
+
+        } elseif ($action === 'reject') {
+            $reason = trim($_POST['rejection_reason'] ?? '');
+            if ($reason === '') {
+                $action_error = "Rejection reason required.";
+            } else {
+                $stmt = $conn->prepare("UPDATE booking SET status='rejected', rejection_reason=?, updated_at=NOW() WHERE booking_id=? AND status IN ('pending','waiting_verification')");
+                $stmt->bind_param('si', $reason, $booking_id);
+                $stmt->execute();
+                $changed = $stmt->affected_rows;
+                $stmt->close();
+                $_SESSION['flash_message'] = $changed
+                    ? "Booking rejected."
+                    : "Cannot reject: not in pending state.";
+                header("Location: booking_details.php?id=".$booking_id);
+                exit;
+            }
+        }
     }
 }
 
-// Fetch booking + car + customer info
-$stmt = $conn->prepare("
-    SELECT
-        b.*,
-        c.car_brand,
-        c.car_model,
-        c.daily_rate AS car_daily_rate,
-        c.hourly_rate AS car_hourly_rate,
-        c.year,
-        c.color,
-        c.mileage,
-        c.plate_no,
-        c.transmission,
-        c.seat_capacity,
-        cust.full_name as customer_name,
-        cust.phone_no as customer_phone,
-        cust.email as customer_email
-    FROM booking b
-    JOIN car c ON b.car_id = c.car_id
-    LEFT JOIN customer cust ON b.cust_id = cust.cust_id
-    WHERE b.booking_id = ?
-    LIMIT 1
-");
-$stmt->bind_param("i", $booking_id);
+/* Fetch Booking */
+$sql = "
+SELECT
+    b.booking_id, b.cust_id, b.car_id,
+    b.pickup_datetime, b.return_datetime,
+    b.day_count, b.daily_rate, b.total_price,
+    b.security_deposit,
+    b.security_deposit_deduction,
+    b.security_deposit_refund,
+    b.deposit_status,
+    b.deposit_last_adjusted_at,
+    b.deposit_damage_description,
+    b.pickup_mileage, b.return_mileage,
+    b.pickup_fuel_percent, b.return_fuel_percent,
+    b.status, b.rejection_reason, b.cancellation_reason,
+    b.created_at, b.confirmed_at, b.approved_at,
+    c.car_brand, c.car_model, c.daily_rate AS car_daily_rate,
+    c.plate_no, c.year, c.color, c.mileage AS car_mileage_snapshot,
+    c.transmission, c.seat_capacity,
+    cust.full_name AS customer_name,
+    cust.phone_no AS customer_phone,
+    cust.email AS customer_email,
+    cust.id_no AS customer_id_no,
+    cust.id_front_image AS cust_id_front_image,
+    cust.id_back_image AS cust_id_back_image,
+    cust.license_front_image AS cust_license_front_image,
+    cust.license_back_image AS cust_license_back_image,
+    af.guarantor_id
+FROM booking b
+JOIN car c ON b.car_id = c.car_id
+LEFT JOIN customer cust ON b.cust_id = cust.cust_id
+LEFT JOIN agreement_form af ON af.booking_id = b.booking_id
+WHERE b.booking_id = ?
+LIMIT 1
+";
+$stmt = $conn->prepare($sql);
+$stmt->bind_param('i', $booking_id);
 $stmt->execute();
-$result = $stmt->get_result();
-$booking = $result->fetch_assoc();
+$booking = $stmt->get_result()->fetch_assoc();
 $stmt->close();
 
 if (!$booking) {
@@ -79,493 +192,854 @@ if (!$booking) {
     exit;
 }
 
-// Fetch car image
-$stmt = $conn->prepare("SELECT image_path FROM car_image WHERE car_id = ? ORDER BY car_image_id ASC LIMIT 1");
-$stmt->bind_param("i", $booking['car_id']);
-$stmt->execute();
-$stmt->bind_result($car_image);
-$stmt->fetch();
-$stmt->close();
+/* Car primary image */
+$car_image_blob = null;
+$imgStmt = $conn->prepare("
+    SELECT image_blob
+    FROM car_image
+    WHERE car_id=?
+    ORDER BY sort_order ASC, car_image_id ASC
+    LIMIT 1
+");
+$imgStmt->bind_param('i', $booking['car_id']);
+$imgStmt->execute();
+$imgStmt->bind_result($car_image_blob);
+$imgStmt->fetch();
+$imgStmt->close();
 
-// Fetch driver details from driver table (using booking's driver_id)
-$driver = null;
-if (!empty($booking['driver_id'])) {
-    $stmt = $conn->prepare("SELECT * FROM driver WHERE driver_id = ?");
-    $stmt->bind_param("i", $booking['driver_id']);
-    $stmt->execute();
-    $driver = $stmt->get_result()->fetch_assoc();
-    $stmt->close();
-}
-
-// Fetch guarantor (if any) by driver_id
+/* Guarantor */
 $guarantor = null;
-if ($driver) {
-    $stmt = $conn->prepare("SELECT * FROM guarantor WHERE driver_id = ? ORDER BY guarantor_id DESC LIMIT 1");
-    $stmt->bind_param("i", $booking['driver_id']);
-    $stmt->execute();
-    $guarantor = $stmt->get_result()->fetch_assoc();
-    $stmt->close();
+if (!empty($booking['guarantor_id'])) {
+    $gStmt = $conn->prepare("
+        SELECT full_name, phone_no, id_no, relationship,
+               id_front_image, id_back_image
+        FROM guarantor
+        WHERE guarantor_id=? LIMIT 1
+    ");
+    $gStmt->bind_param('i', $booking['guarantor_id']);
+    $gStmt->execute();
+    $guarantor = $gStmt->get_result()->fetch_assoc();
+    $gStmt->close();
 }
 
-// Fetch all services for this booking, including notes (delivery location)
-$stmt = $conn->prepare("SELECT service_type, fee, notes FROM service WHERE booking_id = ?");
-$stmt->bind_param("i", $booking_id);
-$stmt->execute();
-$services = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
-$stmt->close();
+/* Services */
+$svcStmt = $conn->prepare("
+    SELECT service_id, service_type, fee, status, delivery_location, return_location
+    FROM service
+    WHERE booking_id=?
+    ORDER BY service_id DESC
+");
+$svcStmt->bind_param('i', $booking_id);
+$svcStmt->execute();
+$services = $svcStmt->get_result()->fetch_all(MYSQLI_ASSOC);
+$svcStmt->close();
 
-// Calculate rental breakdown
-$daily_rate = (float)($booking['daily_rate'] ?? 0);
-$hourly_rate = (float)($booking['hourly_rate'] ?? 0);
-$day_count = (int)($booking['day_count'] ?? 0);
-$hour_count = (int)($booking['hour_count'] ?? 0);
-$subtotal = ($daily_rate * $day_count) + ($hourly_rate * $hour_count);
-
-// Delivery info (from service table)
-$delivery_type_display = '-';
-$delivery_fee = 0.00;
-$total_services_fee = 0.00;
-$delivery_location = '';
+/* Primary service identification */
+$primaryService = null;
 foreach ($services as $s) {
-    $total_services_fee += (float)$s['fee'];
-    if ($s['service_type'] === 'delivery' || $s['service_type'] === 'pickup_and_return') {
-        $delivery_type_display = ucwords(str_replace('_', ' ', $s['service_type']));
-        $delivery_fee = (float)$s['fee'];
-        if (!empty($s['notes'])) {
-            $delivery_location = $s['notes'];
-        }
+    if (in_array($s['service_type'], ['delivery','pickup_and_return','self_pickup'], true)) {
+        $primaryService = $s;
+        break;
+    }
+}
+$delivery_type_display = 'Pickup Myself (Free)';
+$delivery_location = '';
+$return_location = '';
+$delivery_fee = 0.00;
+$current_delivery_fee_raw = '';
+$service_mode = 'self_pickup';
+
+if ($primaryService) {
+    $service_mode = $primaryService['service_type'];
+    if ($service_mode === 'delivery') {
+        $delivery_type_display = 'Delivery (Drop-off Only)';
+        $delivery_location = $primaryService['delivery_location'] ?? '';
+        $delivery_fee = (float)$primaryService['fee'];
+        $current_delivery_fee_raw = $delivery_fee > 0 ? number_format($delivery_fee,2,'.','') : '';
+    } elseif ($service_mode === 'pickup_and_return') {
+        $delivery_type_display = 'Pickup & Return';
+        $delivery_location = $primaryService['delivery_location'] ?? '';
+        $return_location = $primaryService['return_location'] ?? '';
+        $delivery_fee = (float)$primaryService['fee'];
+        $current_delivery_fee_raw = $delivery_fee > 0 ? number_format($delivery_fee,2,'.','') : '';
+    } elseif ($service_mode === 'self_pickup') {
+        $delivery_type_display = 'Pickup Myself (Free)';
+        $delivery_fee = 0.00;
     }
 }
 
-// Get security deposit from booking, fallback to 100 if not set
-$security_deposit = isset($booking['security_deposit']) ? (float)$booking['security_deposit'] : 100.00;
-
-$total_price = $subtotal + $total_services_fee + $security_deposit;
-
-// --------- Get agreement_id for this booking --------- //
-$stmt = $conn->prepare("SELECT agreement_id FROM agreement_form WHERE booking_id = ? LIMIT 1");
-$stmt->bind_param("i", $booking_id);
-$stmt->execute();
-$stmt->bind_result($agreement_id);
-$stmt->fetch();
-$stmt->close();
-
-$agreement_download_link = "";
-if ($agreement_id) {
-    $agreement_download_link = "download_agreement.php?id=" . urlencode($agreement_id);
+/* Other services total */
+$other_services_total = 0.00;
+foreach ($services as $s) {
+    if ($primaryService && $s['service_id'] === $primaryService['service_id']) continue;
+    $other_services_total += (float)$s['fee'];
 }
 
-// Get all booking images (car condition, etc)
-$stmt = $conn->prepare("SELECT image_path, image_type, capture_type, uploaded_at, remarks FROM booking_image WHERE booking_id = ?");
-$stmt->bind_param("i", $booking_id);
-$stmt->execute();
-$img_result = $stmt->get_result();
-$booking_imgs = $img_result->fetch_all(MYSQLI_ASSOC);
-$stmt->close();
+/* Agreement (ensure visible state) */
+$agreement_id = null;
+$agrStmt = $conn->prepare("SELECT agreement_id FROM agreement_form WHERE booking_id=? LIMIT 1");
+$agrStmt->bind_param('i', $booking_id);
+$agrStmt->execute();
+$agrStmt->bind_result($agreement_id);
+$agrStmt->fetch();
+$agrStmt->close();
+$agreement_download_link = $agreement_id ? "download_agreement.php?id=".urlencode((string)$agreement_id) : null;
 
-// ---- E-INSPECTION STATUS (from booking_image table, by capture_type) ---- //
-$has_return_img = false;
-foreach ($booking_imgs as $img) {
-    if (isset($img['capture_type'])) {
-        if (strtolower($img['capture_type']) == 'return') $has_return_img = true;
-    }
+/* Inspection images */
+$imgStmt = $conn->prepare("
+    SELECT booking_image_id, image_path, image_type, capture_type, uploaded_at, inspection_date
+    FROM booking_image
+    WHERE booking_id=?
+    ORDER BY booking_image_id ASC
+");
+$imgStmt->bind_param('i', $booking_id);
+$imgStmt->execute();
+$booking_imgs = $imgStmt->get_result()->fetch_all(MYSQLI_ASSOC);
+$imgStmt->close();
+
+/* Grouping */
+$requiredTypes = ['car_front','car_back','car_left','car_right','fuel_image'];
+$pickupImages = [];
+$returnImages = [];
+foreach ($booking_imgs as $bi) {
+    $ct = strtolower($bi['capture_type'] ?? '');
+    if ($ct === 'pickup') $pickupImages[] = $bi;
+    elseif ($ct === 'return') $returnImages[] = $bi;
 }
-$inspection_return = (
-    !empty($booking['return_mileage']) &&
-    !empty($booking['return_fuel_percent']) &&
-    !empty($booking['return_datetime']) &&
-    $has_return_img
-);
-$pickup_filled = (
-    !empty($booking['pickup_mileage']) &&
-    !empty($booking['pickup_fuel_percent']) &&
-    !empty($booking['pickup_datetime'])
-);
+$pickup_filled = !empty($booking['pickup_mileage']) &&
+                 $booking['pickup_fuel_percent'] !== null &&
+                 !empty($booking['pickup_datetime']) &&
+                 !empty($pickupImages);
+$return_inspection_done = !empty($booking['return_mileage']) &&
+                          $booking['return_fuel_percent'] !== null &&
+                          !empty($booking['return_datetime']) &&
+                          !empty($returnImages);
+
+function missingTypes(array $images, array $required): array {
+    $present = [];
+    foreach ($images as $im) $present[] = strtolower($im['image_type']);
+    return array_values(array_diff($required, $present));
+}
+$pickupMissing = missingTypes($pickupImages, $requiredTypes);
+$returnMissing = missingTypes($returnImages, $requiredTypes);
+
+$imageTypeLabel = [
+    'car_front' => 'Front',
+    'car_back' => 'Back',
+    'car_left' => 'Left Side',
+    'car_right' => 'Right Side',
+    'fuel_image' => 'Fuel Gauge',
+    'additional_image' => 'Additional'
+];
+
+/* Pricing / totals */
+$day_count = (int)$booking['day_count'];
+$daily_rate = (float)($booking['daily_rate'] ?? $booking['car_daily_rate'] ?? 0);
+$security_deposit = (float)$booking['security_deposit'];
+$rental_subtotal = $day_count * $daily_rate;
+
+if ($booking['total_price'] !== null) {
+    $stored_total = (float)$booking['total_price'];
+    $computed_core_total = $rental_subtotal + $security_deposit + $delivery_fee;
+    $total_price_final = $stored_total;
+} else {
+    $computed_core_total = $rental_subtotal + $security_deposit + $delivery_fee;
+    $stored_total = null;
+    $total_price_final = $computed_core_total;
+}
+$grand_plus_other = $total_price_final + $other_services_total;
+
+/* Status */
+$status = strtolower($booking['status']);
+$flash_message = $_SESSION['flash_message'] ?? null;
+unset($_SESSION['flash_message']);
+
+$displayLabel = match($status) {
+    'pending', 'waiting_verification' => 'Pending Approval',
+    'approved' => 'Pending Payment',
+    'confirmed' => 'Confirmed',
+    'completed' => 'Completed',
+    'cancelled' => 'Cancelled',
+    'rejected' => 'Rejected',
+    default => ucwords(str_replace('_',' ', $status)),
+};
+
+/* Deposit summary */
+$dep_original = $security_deposit;
+$dep_deduction = (float)($booking['security_deposit_deduction'] ?? 0);
+$dep_refund = (float)($booking['security_deposit_refund'] ?? max($dep_original - $dep_deduction, 0));
+$dep_status = $booking['deposit_status'] ?? 'held';
+$dep_damage_desc = $booking['deposit_damage_description'] ?? '';
+$dep_status_label = match($dep_status) {
+    'held' => 'Held',
+    'pending_refund' => 'Pending Refund',
+    'refunded' => 'Refunded',
+    'forfeited' => 'Forfeited',
+    default => ucfirst(str_replace('_',' ', $dep_status))
+};
+
+/* Refund row (deposit) */
+$deposit_refund_row = null;
+$refCode = 'DEP-' . $booking_id;
+$refStmt = $conn->prepare("
+    SELECT refund_id, amount, refund_status, notes, processed_at, created_at
+    FROM refunds
+    WHERE booking_id=? AND reference_code=?
+    LIMIT 1
+");
+$refStmt->bind_param('is', $booking_id, $refCode);
+$refStmt->execute();
+$deposit_refund_row = $refStmt->get_result()->fetch_assoc();
+$refStmt->close();
 
 include 'admin_header.php';
 ?>
-<link rel="stylesheet" href="/assets/css/style.css">
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Booking #<?= e((string)$booking_id) ?> - Admin</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
-body { background: #eceef4; }
-.review-section {
-    max-width: 800px;
-    margin: 40px auto;
-    background: #fff;
-    border-radius: 13px;
-    box-shadow: 0 4px 16px rgba(44,60,102,0.09);
-    padding: 32px 40px 28px 40px;
+/* Only key styles shown; adjust or merge with your global CSS */
+body { background:#eceef4; font-family:'Inter',Arial,sans-serif; margin:0; }
+.review-section { max-width:1150px; margin:40px auto 70px; background:#fff; border-radius:14px; box-shadow:0 4px 18px rgba(44,60,102,.09); padding:36px 44px; }
+.review-title { font-size:1.6em; font-weight:800; color:#28306f; margin:0 0 24px; }
+.flash-msg { background:#e6fcf3; color:#218c6d; padding:12px 20px; border-radius:9px; font-weight:600; margin:0 0 22px; }
+.error-msg { background:#ffeded; color:#b62f2f; padding:12px 20px; border-radius:9px; font-weight:600; margin:0 0 22px; }
+.section-label { margin:32px 0 14px; font-weight:800; font-size:1.05em; color:#3c4764; letter-spacing:.5px; }
+.review-table { width:100%; border-collapse:collapse; margin-bottom:24px; font-size:.94em; }
+.review-table th { background:#f3f5f9; padding:10px 14px; font-weight:600; width:210px; color:#33415d; border-bottom:1px solid #e3e7ef; text-align:left; }
+.review-table td { padding:10px 14px; border-bottom:1px solid #eef1f6; color:#2a324a; }
+.total { font-weight:700; color:#1d2c6b; }
+.car-img-thumb { width:180px; height:110px; object-fit:cover; border-radius:8px; border:1px solid #d9dfea; background:#f2f4f9; display:block; margin-bottom:10px; }
+.action-form-row { display:flex; flex-wrap:wrap; gap:14px; margin:0 0 28px; background:#f5f8fc; border:1px solid #e2e9f3; border-radius:12px; padding:18px 22px; }
+.action-btn { padding:12px 30px; border-radius:9px; border:none; color:#fff; font-size:.9em; font-weight:700; cursor:pointer; transition:background .18s; display:inline-flex; align-items:center; gap:6px; text-decoration:none; }
+.action-btn.secondary { background:#677489; } .action-btn.secondary:hover { background:#536071; }
+.action-btn.approve { background:#23c960; } .action-btn.approve:hover { background:#1ea753; }
+.action-btn.reject { background:#e54848; } .action-btn.reject:hover { background:#b83232; }
+.rejection-reason-input { padding:10px 16px; border:1.5px solid #d4deed; font-size:.85em; border-radius:8px; display:none; }
+.confirm-reject-btn { display:none; }
+.delivery-fee-panel { display:flex; flex-wrap:wrap; gap:16px; align-items:flex-end; margin-top:8px; }
+.readonly-box { background:#f0f3f9; border:1.5px solid #d8e0ec; padding:10px 14px; border-radius:8px; font-size:.8em; font-weight:700; color:#2d3952; min-width:210px; }
+.notice { font-size:.68em; color:#6e7c8a; margin-top:4px; line-height:1.3em; }
+.badge-small { background:#eef2f7; padding:3px 7px; border-radius:6px; font-size:.6rem; font-weight:600; }
+.img-grid { display:flex; flex-wrap:wrap; gap:14px; }
+.img-thumb { width:120px; height:80px; object-fit:cover; border-radius:6px; border:1px solid #cfd6e4; cursor:pointer; background:#f7f9fc; transition:box-shadow .18s, transform .18s; }
+.img-thumb:hover { box-shadow:0 4px 14px rgba(0,0,0,.18); transform:translateY(-2px); }
+.img-missing { width:120px; height:80px; border:1px dashed #cfd6e4; border-radius:6px; font-size:.65rem; display:flex; align-items:center; justify-content:center; color:#7d8a9b; }
+.deposit-status-label { font-weight:600; padding:4px 10px; border-radius:6px; font-size:.65rem; text-transform:uppercase; }
+.deposit-held { background:#eef2f7; color:#445064; }
+.deposit-pending_refund { background:#fff6d8; color:#9d7a00; }
+.deposit-refunded { background:#e4fae8; color:#14773f; }
+.deposit-forfeited { background:#ffe3e3; color:#b32828; }
+.inspection-wrapper { margin-top:6px; }
+.filter-bar { display:flex; gap:10px; flex-wrap:wrap; margin:6px 0 18px; }
+.filter-btn { border:1px solid #cfd6e2; background:#f0f4f9; color:#2d3a53; padding:8px 16px; border-radius:8px; font-size:.7rem; font-weight:600; cursor:pointer; }
+.filter-btn.active { background:#2d57d3; color:#fff; border-color:#2d57d3; }
+.inspection-groups { display:flex; flex-direction:column; gap:30px; }
+.inspection-group { background:#f7f9fc; border:1px solid #e1e6ef; border-radius:12px; padding:18px 20px 22px; }
+.image-cards { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:16px; }
+.image-card { border:1px solid #d5dce7; background:#fff; border-radius:10px; padding:8px 8px 10px; display:flex; flex-direction:column; gap:6px; position:relative; }
+.image-card img { width:100%; height:96px; object-fit:cover; border-radius:6px; border:1px solid #d0d7e3; cursor:pointer; background:#f0f4f9; }
+.image-stamp { position:absolute; top:6px; left:6px; background:rgba(0,0,0,.55); color:#fff; font-size:.55rem; padding:3px 6px; border-radius:6px; font-weight:600; }
+.image-type-label { font-size:.62rem; font-weight:700; color:#2f4165; }
+.image-meta { font-size:.6rem; line-height:.95rem; color:#465065; }
+.status-label { padding:6px 16px; border-radius:18px; font-weight:700; font-size:.68rem; text-transform:uppercase; }
+.status-pending_approval { background:#fff6d8; color:#b28a00; }
+.status-pending_payment { background:#ffe9d8; color:#b25900; }
+.status-confirmed { background:#e5f1ff; color:#0a52a1; }
+.status-completed { background:#e4fae8; color:#14773f; }
+.status-cancelled,.status-rejected { background:#ffe3e3; color:#c03636; }
+.back-btn { background:#cfd6e4; color:#23304d; border:none; padding:13px 38px; border-radius:9px; font-size:.95em; font-weight:700; display:block; margin:40px auto 6px; text-align:center; text-decoration:none; }
+.back-btn:hover { background:#b8c2d4; }
+.agreement-bar { display:flex; gap:14px; flex-wrap:wrap; align-items:center; background:#f4f7fb; border:1px solid #d9e2ee; padding:14px 18px; border-radius:10px; margin:4px 0 20px; }
+.agreement-status { font-size:.7rem; font-weight:600; letter-spacing:.4px; padding:6px 12px; border-radius:20px; background:#eef2f8; color:#31405d; }
+.agreement-status.missing { background:#ffe6e6; color:#a63a3a; }
+.agreement-status.available { background:#e2f9e8; color:#18723d; }
+.download-agreement-btn { background:#4158d0; color:#fff; padding:10px 20px; border:none; border-radius:8px; font-size:.72rem; font-weight:700; letter-spacing:.5px; text-decoration:none; display:inline-block; }
+.download-agreement-btn:hover { background:#2f47b9; }
+#imgModal { position:fixed; inset:0; background:rgba(16,26,44,.85); display:none; align-items:center; justify-content:center; z-index:9999; padding:40px 26px; }
+#imgModal img { max-width:90vw; max-height:80vh; box-shadow:0 10px 28px rgba(0,0,0,.55); border-radius:10px; background:#fff; }
+#imgModal .close-btn, #imgModal .nav-btn { position:absolute; background:#ffffff; border:none; padding:10px 16px; border-radius:8px; font-weight:700; cursor:pointer; box-shadow:0 2px 8px rgba(0,0,0,.25); font-size:.75rem; }
+#imgModal .close-btn { top:14px; right:20px; }
+#imgModal .nav-btn { top:50%; transform:translateY(-50%); }
+#imgModal .prev-btn { left:18px; }
+#imgModal .next-btn { right:18px; }
+.modal-caption { margin-top:12px; font-size:.7rem; color:#eef3f8; text-align:center; max-width:86vw; line-height:1.2rem; font-weight:500; }
+.modal-caption span { color:#ffdf6e; font-weight:600; }
+@media (max-width:900px){
+  .review-section{padding:30px 26px 48px;}
+  .image-cards{grid-template-columns:repeat(auto-fill,minmax(130px,1fr));}
+  .agreement-bar{flex-direction:column; align-items:flex-start;}
 }
-.review-title {
-    font-size: 1.35em;
-    font-weight: 700;
-    color: #2f377d;
-    margin-bottom: 24px;
-}
-.review-table { width:100%; border-collapse:collapse; margin-bottom: 30px; }
-.review-table th, .review-table td { padding: 8px 12px; }
-.review-table th { text-align: left; background: #f0f0f0; width: 180px; }
-.review-table td:last-child { text-align: right; }
-.total { font-size:1.1em; font-weight: bold; color: #203090; }
-.section-label { margin: 18px 0 8px 0; font-weight: 600; color: #444; }
-.car-img-thumb {
-    width: 150px;
-    height: 90px;
-    object-fit: cover;
-    border-radius: 7px;
-    border: 1px solid #dadada;
-    background: #f2f3f8;
-    margin-bottom: 10px;
-    display: block;
-}
-.status-label {
-    padding: 4px 13px;
-    border-radius: 8px;
-    font-weight: 600;
-    font-size: 0.98em;
-    display: inline-block;
-}
-.status-pending, .status-waiting_verification { background: #fffbe7; color: #bfa800; }
-.status-confirmed, .status-upcoming { background: #f7faff; color: #2f377d; }
-.status-completed { background: #e3fbe6; color: #219150; }
-.status-cancelled, .status-rejected { background: #fde9e9; color: #d42d2d; }
-.back-btn {
-    background: #ccc;
-    color: #222;
-    border: none;
-    padding: 12px 30px;
-    border-radius: 7px;
-    font-size: 1.08em;
-    font-weight: 600;
-    cursor: pointer;
-    transition: background 0.18s;
-    margin-top: 20px;
-    display: block;
-    width: 180px;
-    margin-left: auto;
-    margin-right: auto;
-}
-.back-btn:hover {background: #bbb;}
-.agreement-link {
-    display: inline-block;
-    margin: 12px 0 20px 0;
-    padding: 10px 24px;
-    background: #3c4cb8;
-    color: #fff;
-    border-radius: 7px;
-    font-weight: 600;
-    text-decoration: none;
-    font-size: 1.05em;
-    box-shadow: 0 2px 6px rgba(60,60,60,0.05);
-    transition: background 0.17s;
-}
-.agreement-link:hover {
-    background: #234c96;
-}
-.einspection-label {
-    color: #8a96ad;
-    font-weight: 700;
-    font-size: 1.11em;
-    margin-top: 26px;
-    margin-bottom: 8px;
-    letter-spacing: 1px;
-}
-.einspection-row {
-    display: flex;
-    gap: 14px;
-    margin-bottom: 12px;
-}
-.einspection-btn {
-    padding: 9px 26px 9px 18px;
-    background: #f4f6fa;
-    border-radius: 11px;
-    border: none;
-    font-size: 1.08em;
-    color: #21243d;
-    font-weight: 500;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    box-shadow: none;
-    outline: none;
-    cursor: pointer;
-    transition: background 0.15s;
-    text-decoration: none;
-}
-.einspection-btn svg {
-    width: 1.24em;
-    height: 1.24em;
-    display: inline-block;
-    vertical-align: middle;
-}
-.einspection-btn.done {
-    color: #0a9151;
-    font-weight: 600;
-    background: #f4f6fa;
-}
-.einspection-btn:not(.done) {
-    color: #222;
-    font-weight: 500;
-}
-.einspection-btn:hover { background: #e9eef7; }
-.action-form-row {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    margin-top: 18px;
-    margin-bottom: 10px;
-    background: #f8fafc;
-    border-radius: 10px;
-    padding: 14px 20px;
-    box-shadow: 0 2.5px 10px #e5e8f3a5;
-    width: fit-content;
-}
-.action-btn {
-    padding: 10px 30px;
-    border-radius: 8px;
-    border: none;
-    color: #fff;
-    font-size: 1.09em;
-    font-weight: 700;
-    cursor: pointer;
-    transition: background 0.18s, box-shadow 0.14s;
-    margin: 0;
-    box-shadow: 0 2px 7px #2bc96018;
-    outline: none;
-    border: 2px solid transparent;
-    display: inline-block;
-}
-.action-btn.approve {
-    background: #23c960;
-}
-.action-btn.approve:focus,
-.action-btn.approve:hover {
-    background: #1ea753;
-    border-color: #19a34c;
-}
-.action-btn.reject {
-    background: #e54848;
-}
-.action-btn.reject:focus,
-.action-btn.reject:hover {
-    background: #b32d2d;
-    border-color: #b32d2d;
-}
-.rejection-reason-input {
-    padding: 10px 17px;
-    border: 1.5px solid #e1e6f3;
-    font-size: 1.03em;
-    min-width: 230px;
-    outline: none;
-    background: #fff;
-    color: #31436e;
-    font-weight: 500;
-    border-radius: 7px;
-    transition: border 0.15s;
-    margin-left: 12px;
-    margin-right: 0;
-    display: none;
-}
-.rejection-reason-input:focus {
-    border-color: #4156c7;
-    background: #f2f7ff;
-}
-@media (max-width: 600px) {
-    .action-form-row {
-        flex-direction: column;
-        align-items: stretch;
-        gap: 10px;
-        padding: 10px 7px;
-        width: 100%;
-    }
-    .action-btn,
-    .rejection-reason-input {
-        border-radius: 8px !important;
-        border: 1.5px solid #e1e6f3 !important;
-        box-shadow: none !important;
-        margin: 0 !important;
-        width: 100%;
-    }
+@media (max-width:560px){
+  .image-cards{grid-template-columns:repeat(auto-fill,minmax(110px,1fr));}
 }
 </style>
-
+</head>
+<body>
 <div class="review-section">
-    <div class="review-title">Booking Details (Admin View)</div>
-    <?php if (!empty($_SESSION['flash_message'])): ?>
-        <div style="background:#e6fcf3;color:#218c6d;padding:10px 20px;border-radius:7px;margin-bottom:10px;">
-            <?= htmlspecialchars($_SESSION['flash_message']); unset($_SESSION['flash_message']); ?>
-        </div>
-    <?php endif; ?>
+    <div class="review-title">Booking Details #<?= e((string)$booking_id) ?></div>
 
-    <?php $status = strtolower($booking['status']); ?>
-    <?php if ($status == 'waiting_verification'): ?>
-        <form method="post" action="booking_details.php?id=<?= $booking_id ?>" class="action-form-row" id="approvalForm" autocomplete="off" onsubmit="return validateRejectReason();">
-            <button type="submit" name="booking_action" value="approve" class="action-btn approve">Approve</button>
-            <button type="button" id="rejectBtn" class="action-btn reject" style="margin-left:12px;">Reject</button>
-            <input type="text" name="rejection_reason" class="rejection-reason-input" id="rejectionReason" placeholder="Enter rejection reason..." autocomplete="off">
-            <button type="submit" name="booking_action" value="reject" id="confirmRejectBtn" class="action-btn reject" style="display:none;margin-left:12px;">Confirm Reject</button>
+    <?php if ($flash_message): ?><div class="flash-msg"><?= e($flash_message) ?></div><?php endif; ?>
+    <?php if ($action_error): ?><div class="error-msg"><?= e($action_error) ?></div><?php endif; ?>
+
+    <?php if (in_array($status, ['pending','waiting_verification'], true)): ?>
+        <form method="post" class="action-form-row" autocomplete="off" id="feeForm">
+            <input type="hidden" name="csrf_token" value="<?= e($csrf_token) ?>">
+            <div style="flex:1 1 100%;font-weight:700;color:#36415c;">Service</div>
+            <div class="delivery-fee-panel" style="flex:1 1 100%;">
+                <div>
+                    <label>Service Type</label>
+                    <div class="readonly-box"><?= e($delivery_type_display) ?></div>
+                </div>
+                <?php if ($service_mode === 'delivery' || $service_mode === 'pickup_and_return'): ?>
+                    <div>
+                        <label>Drop-off Location</label>
+                        <div class="readonly-box"><?= e($delivery_location ?: '-') ?></div>
+                    </div>
+                <?php endif; ?>
+                <?php if ($service_mode === 'pickup_and_return'): ?>
+                    <div>
+                        <label>Pickup (Return) Location</label>
+                        <div class="readonly-box"><?= e($return_location ?: '-') ?></div>
+                    </div>
+                <?php endif; ?>
+                <div>
+                    <label for="service_fee">Fee (RM)</label>
+                    <input type="number" step="0.01" min="0" name="service_fee" id="service_fee"
+                           value="<?= e($current_delivery_fee_raw) ?>"
+                           placeholder="0.00"
+                           <?= ($service_mode === 'delivery' || $service_mode === 'pickup_and_return') ? '' : 'disabled' ?>>
+                </div>
+                <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                    <button type="submit" name="booking_action" value="save_fee" class="action-btn secondary"
+                        <?= ($service_mode === 'delivery' || $service_mode === 'pickup_and_return') ? '' : 'disabled' ?>>Save Fee</button>
+                    <button type="submit" name="booking_action" value="approve" class="action-btn approve">Approve</button>
+                    <button type="button" id="showRejectBtn" class="action-btn reject">Reject</button>
+                    <input type="text" name="rejection_reason" id="rejectionReason" class="rejection-reason-input" placeholder="Enter rejection reason...">
+                    <button type="submit" name="booking_action" value="reject" id="confirmRejectBtn" class="action-btn reject confirm-reject-btn">Confirm Reject</button>
+                </div>
+                <div style="flex:1 1 100%;margin-top:4px;">
+                    <span class="notice">Self Pickup: approve directly (no fee). Delivery / Pickup & Return: set fee first.</span>
+                </div>
+            </div>
         </form>
-        <script>
-        document.getElementById('rejectBtn').addEventListener('click', function() {
-            document.getElementById('rejectionReason').style.display = 'inline-block';
-            document.getElementById('confirmRejectBtn').style.display = 'inline-block';
-            document.getElementById('rejectionReason').focus();
-            this.style.display = 'none';
-        });
-        function validateRejectReason() {
-            var reasonInput = document.getElementById('rejectionReason');
-            var confirmBtn = document.getElementById('confirmRejectBtn');
-            if (confirmBtn.style.display === 'inline-block' && confirmBtn === document.activeElement) {
-                if (!reasonInput.value.trim()) {
-                    reasonInput.style.borderColor = "#e54848";
-                    reasonInput.focus();
-                    return false;
-                }
-            }
-            return true;
-        }
-        </script>
-        <hr>
-    <?php elseif ($status != 'cancelled' && $status != 'rejected'): ?>
-        <!-- E-INSPECTION section: only for statuses that are NOT cancelled or rejected -->
-        <div class="einspection-label">E-INSPECTION</div>
-        <div class="einspection-row">
-            <a class="einspection-btn<?= $pickup_filled ? ' done' : '' ?>" href="inspection_add.php?booking_id=<?= $booking_id ?>&type=pickup">
-                <?php if ($pickup_filled): ?>
-                    <svg viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="10" fill="#17C964"/><path d="M14.3 8.3a1 1 0 1 0-1.6-1.2l-3 4-1.4-1.3A1 1 0 1 0 6.3 11.2l2.1 1.8a1 1 0 0 0 1.4-.2l3.5-4.5Z" fill="#fff"/></svg>
-                <?php else: ?>
-                    <svg width="16" height="16" fill="none"><rect width="16" height="16" rx="8" fill="#b5bee5"/><path d="M8 4v8M4 8h8" stroke="#222" stroke-width="1.5" stroke-linecap="round"/></svg>
-                <?php endif; ?>
-                Pickup
+    <?php elseif ($status === 'approved'): ?>
+        <div class="action-form-row" style="justify-content:space-between;align-items:center;">
+            <div style="font-weight:600;color:#344050;">Status: Pending Payment (awaiting customer payment)</div>
+        </div>
+    <?php elseif (!in_array($status, ['cancelled','rejected','completed'], true)): ?>
+        <div class="section-label" style="margin-top:0;">E-Inspection</div>
+        <div class="delivery-fee-panel" style="margin-bottom:12px;">
+            <a class="readonly-box" style="text-decoration:none;cursor:pointer;background:<?= $pickup_filled ? '#def6e6':'#f3f5f9'; ?>;"
+               href="inspection_add.php?booking_id=<?= $booking_id ?>&type=pickup">
+               <?= $pickup_filled ? 'Pickup Completed':'Pickup Inspection' ?>
             </a>
-            <a class="einspection-btn<?= $inspection_return ? ' done' : '' ?>" href="inspection_add.php?booking_id=<?= $booking_id ?>&type=return">
-                <?php if ($inspection_return): ?>
-                    <svg viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="10" fill="#17C964"/><path d="M14.3 8.3a1 1 0 1 0-1.6-1.2l-3 4-1.4-1.3A1 1 0 1 0 6.3 11.2l2.1 1.8a1 1 0 0 0 1.4-.2l3.5-4.5Z" fill="#fff"/></svg>
-                <?php else: ?>
-                    <svg width="16" height="16" fill="none"><rect width="16" height="16" rx="8" fill="#b5bee5"/><path d="M8 4v8M4 8h8" stroke="#222" stroke-width="1.5" stroke-linecap="round"/></svg>
-                <?php endif; ?>
-                Return
+            <a class="readonly-box" style="text-decoration:none;cursor:pointer;background:<?= $return_inspection_done ? '#def6e6':'#f3f5f9'; ?>;"
+               href="inspection_add.php?booking_id=<?= $booking_id ?>&type=return">
+               <?= $return_inspection_done ? 'Return Completed':'Return Inspection' ?>
             </a>
         </div>
-        <hr>
     <?php endif; ?>
 
-    <!-- Agreement Form Download Link -->
-    <?php if ($agreement_download_link): ?>
-    <div style="margin-bottom:20px;text-align:right;">
-        <a href="<?= htmlspecialchars($agreement_download_link) ?>" target="_blank" class="agreement-link">
-            Download Agreement Form
-        </a>
+    <!-- Agreement Download Section (always visible) -->
+    <div class="agreement-bar">
+        <div class="agreement-status <?= $agreement_download_link ? 'available' : 'missing' ?>">
+            <?= $agreement_download_link ? 'Agreement Available' : 'Agreement Missing' ?>
+        </div>
+        <?php if ($agreement_download_link): ?>
+            <a href="<?= e($agreement_download_link) ?>" target="_blank" class="download-agreement-btn">
+                Download Agreement
+            </a>
+        <?php else: ?>
+            <div style="font-size:.7rem;color:#6a7485;font-weight:600;">
+                No agreement record found. Generate/upload agreement in the Agreement Form section first.
+            </div>
+        <?php endif; ?>
     </div>
-    <?php endif; ?>
 
-    <div class="section-label">Car & Booking Details</div>
+    <div class="section-label">Car & Booking</div>
     <table class="review-table">
         <tr>
             <th>Car</th>
             <td>
-                <?php if (!empty($car_image)): ?>
-                    <img class="car-img-thumb" src="data:image/jpeg;base64,<?= base64_encode($car_image) ?>" alt="Car">
+                <?php if ($car_image_blob): ?>
+                    <img class="car-img-thumb" src="data:image/jpeg;base64,<?= base64_encode($car_image_blob) ?>" alt="Car">
                 <?php else: ?>
-                    <img class="car-img-thumb" src="/assets/images/no-car.png" alt="No Car Image">
+                    <img class="car-img-thumb" src="/assets/images/no-car.png" alt="No Image">
                 <?php endif; ?>
-                <?= htmlspecialchars($booking['car_brand'].' '.$booking['car_model']) ?>
+                <?= e($booking['car_brand'].' '.$booking['car_model']) ?>
             </td>
         </tr>
-        <tr>
-            <th>Plate No</th>
-            <td><?= htmlspecialchars($booking['plate_no']) ?></td>
-        </tr>
-        <tr>
-            <th>Rental Type</th>
-            <td>
-                <?php
-                if ($day_count > 0 && $hour_count > 0) echo "Daily + Hourly";
-                elseif ($day_count > 0) echo "Daily";
-                else echo "Hourly";
-                ?>
-            </td>
-        </tr>
-        <?php if ($day_count > 0): ?>
-        <tr><th>Daily Rate</th><td>RM <?= number_format($daily_rate,2) ?></td></tr>
-        <tr><th>Daily Count</th><td><?= $day_count ?> day(s)</td></tr>
+        <tr><th>Plate No</th><td><?= e($booking['plate_no']) ?></td></tr>
+        <tr><th>Day Count</th><td><?= $day_count ?> day(s)</td></tr>
+        <tr><th>Daily Rate (Snapshot)</th><td>RM <?= number_format($daily_rate,2) ?></td></tr>
+        <tr><th>Pickup</th><td><?= e($booking['pickup_datetime']) ?></td></tr>
+        <tr><th>Return</th><td><?= e($booking['return_datetime']) ?></td></tr>
+        <tr><th>Service Type</th><td><?= e($delivery_type_display) ?></td></tr>
+        <?php if ($service_mode === 'delivery' || $service_mode === 'pickup_and_return'): ?>
+            <tr><th>Drop-off Location</th><td><?= e($delivery_location ?: '-') ?></td></tr>
         <?php endif; ?>
-        <?php if ($hour_count > 0): ?>
-        <tr><th>Hourly Rate</th><td>RM <?= number_format($hourly_rate,2) ?></td></tr>
-        <tr><th>Hourly Count</th><td><?= $hour_count ?> hour(s)</td></tr>
+        <?php if ($service_mode === 'pickup_and_return'): ?>
+            <tr><th>Pickup (Return) Location</th><td><?= e($return_location ?: '-') ?></td></tr>
         <?php endif; ?>
-        <tr><th>Pickup</th><td><?= htmlspecialchars($booking['pickup_datetime']) ?></td></tr>
-        <tr><th>Return</th><td><?= htmlspecialchars($booking['return_datetime']) ?></td></tr>
-        <tr><th>Delivery Type</th><td><?= htmlspecialchars($delivery_type_display) ?></td></tr>
-        <tr><th>Delivery Fee</th><td>RM <?= number_format($delivery_fee,2) ?></td></tr>
-        <?php if ($delivery_location): ?>
-        <tr><th>Delivery Location</th><td><?= htmlspecialchars($delivery_location) ?></td></tr>
+        <tr><th>Service Fee</th><td>RM <?= number_format($delivery_fee,2) ?></td></tr>
+        <tr><th>Rental Subtotal</th><td>RM <?= number_format($rental_subtotal,2) ?></td></tr>
+        <tr><th>Security Deposit</th><td>RM <?= number_format($security_deposit,2) ?></td></tr>
+        <tr><th>Core Total (Rent+Deposit+Service Fee)</th><td>RM <?= number_format($computed_core_total,2) ?></td></tr>
+        <?php if ($other_services_total > 0): ?>
+            <tr><th>Other Services (Add-on)</th><td>RM <?= number_format($other_services_total,2) ?></td></tr>
         <?php endif; ?>
-        <tr><th>Subtotal</th><td>RM <?= number_format($subtotal,2) ?></td></tr>
         <tr>
-            <th>Security Deposit</th>
-            <td>RM <?= number_format($security_deposit,2) ?></td>
+            <th class="total"><?= $other_services_total > 0 ? 'Grand Total (Incl. Add-ons)' : 'Grand Total' ?></th>
+            <td class="total">RM <?= number_format($other_services_total > 0 ? $grand_plus_other : $computed_core_total, 2) ?></td>
         </tr>
-        <tr>
-            <th class="total">Total Amount</th>
-            <td class="total">RM <?= number_format($total_price,2) ?></td>
-        </tr>
+        <?php if (isset($stored_total) && $stored_total !== null && abs($stored_total - $computed_core_total) > 0.009): ?>
+            <tr>
+                <th>Stored Total (DB)</th>
+                <td style="color:#c03636;font-weight:600;">
+                    RM <?= number_format($stored_total,2) ?>
+                    <div style="font-size:.7rem;color:#666;margin-top:4px;">Differs from current computed total.</div>
+                </td>
+            </tr>
+        <?php elseif (isset($stored_total) && $stored_total !== null): ?>
+            <tr><th>Stored Total (DB)</th><td>RM <?= number_format($stored_total,2) ?></td></tr>
+        <?php endif; ?>
         <tr>
             <th>Status</th>
             <td>
                 <?php
-                    $status_class = 'status-upcoming';
-                    if ($status == 'pending') $status_class = 'status-pending';
-                    else if ($status == 'confirmed') $status_class = 'status-confirmed';
-                    else if ($status == 'completed') $status_class = 'status-completed';
-                    else if ($status == 'cancelled') $status_class = 'status-cancelled';
-                    else if ($status == 'waiting_verification') $status_class = 'status-waiting_verification';
-                    else if ($status == 'rejected') $status_class = 'status-rejected';
-                    else if ($status == 'approved') $status_class = 'status-pending';
+                  $cls = match($status) {
+                      'pending','waiting_verification' => 'status-pending_approval',
+                      'approved' => 'status-pending_payment',
+                      'confirmed' => 'status-confirmed',
+                      'completed' => 'status-completed',
+                      'cancelled' => 'status-cancelled',
+                      'rejected' => 'status-rejected',
+                      default => 'status-pending_approval',
+                  };
                 ?>
-                <span class="status-label <?= $status_class ?>">
-                    <?= ucwords(str_replace('_', ' ', $status)) ?>
-                </span>
+                <span class="status-label <?= e($cls) ?>"><?= e($displayLabel) ?></span>
             </td>
         </tr>
-        <?php if ($status == 'rejected' && !empty($booking['rejection_reason'])): ?>
+        <?php if ($status === 'rejected' && !empty($booking['rejection_reason'])): ?>
+            <tr><th>Rejection Reason</th><td style="color:#c03636;font-weight:600;"><?= e($booking['rejection_reason']) ?></td></tr>
+        <?php endif; ?>
+        <?php if ($status === 'cancelled' && !empty($booking['cancellation_reason'])): ?>
+            <tr><th>Cancellation Reason</th><td style="color:#c03636;"><?= e($booking['cancellation_reason']) ?></td></tr>
+        <?php endif; ?>
+        <tr><th>Created At</th><td><?= e($booking['created_at']) ?></td></tr>
+        <?php if (!empty($booking['approved_at'])): ?><tr><th>Approved At</th><td><?= e($booking['approved_at']) ?></td></tr><?php endif; ?>
+        <?php if (!empty($booking['confirmed_at'])): ?><tr><th>Confirmed At</th><td><?= e($booking['confirmed_at']) ?></td></tr><?php endif; ?>
+    </table>
+
+    <!-- Security Deposit Summary -->
+    <div class="section-label">Security Deposit</div>
+    <table class="review-table">
+        <tr><th>Original Deposit</th><td>RM <?= number_format($dep_original,2) ?></td></tr>
+        <tr><th>Damage Deduction</th><td>RM <?= number_format($dep_deduction,2) ?></td></tr>
+        <tr><th>Refundable</th><td>RM <?= number_format($dep_refund,2) ?></td></tr>
         <tr>
-            <th>Rejection Reason</th>
-            <td style="color:#b82f2f;"><?= htmlspecialchars($booking['rejection_reason']) ?></td>
+            <th>Deposit Status</th>
+            <td>
+                <?php
+                  $depCls = 'deposit-held';
+                  if ($dep_status === 'pending_refund') $depCls = 'deposit-pending_refund';
+                  elseif ($dep_status === 'refunded') $depCls = 'deposit-refunded';
+                  elseif ($dep_status === 'forfeited') $depCls = 'deposit-forfeited';
+                ?>
+                <span class="deposit-status-label <?= e($depCls) ?>"><?= e($dep_status_label) ?></span>
+                <?php if (!empty($booking['deposit_last_adjusted_at'])): ?>
+                    <div style="font-size:.65rem;color:#566273;margin-top:4px;">Last Adjusted: <?= e($booking['deposit_last_adjusted_at']) ?></div>
+                <?php endif; ?>
+            </td>
         </tr>
+        <?php if ($dep_deduction > 0 && $dep_damage_desc): ?>
+            <tr><th>Damage Description</th><td><?= nl2br(e($dep_damage_desc)) ?></td></tr>
+        <?php endif; ?>
+        <?php if ($deposit_refund_row): ?>
+            <tr>
+                <th>Refund Record</th>
+                <td>
+                    Amount: RM <?= number_format((float)$deposit_refund_row['amount'],2) ?>
+                    | Status: <?= e($deposit_refund_row['refund_status']) ?>
+                    <?php if (!empty($deposit_refund_row['notes'])): ?>
+                        <div style="font-size:.7rem;color:#57657b;margin-top:4px;"><?= e($deposit_refund_row['notes']) ?></div>
+                    <?php endif; ?>
+                    <div style="font-size:.65rem;color:#4c5a69;margin-top:2px;">
+                        Created: <?= e($deposit_refund_row['created_at']) ?>
+                        <?php if ($deposit_refund_row['processed_at']): ?>
+                            | Processed: <?= e($deposit_refund_row['processed_at']) ?>
+                        <?php endif; ?>
+                    </div>
+                </td>
+            </tr>
         <?php endif; ?>
     </table>
 
+    <!-- Customer -->
     <div class="section-label">Customer</div>
     <table class="review-table">
-        <tr><th>Name</th><td><?= htmlspecialchars($booking['customer_name']) ?></td></tr>
-        <tr><th>Phone</th><td><?= htmlspecialchars($booking['customer_phone']) ?></td></tr>
-        <tr><th>Email</th><td><?= htmlspecialchars($booking['customer_email']) ?></td></tr>
+        <tr><th>Name</th><td><?= e($booking['customer_name']) ?></td></tr>
+        <tr><th>Phone</th><td><?= e($booking['customer_phone']) ?></td></tr>
+        <tr><th>Email</th><td><?= e($booking['customer_email']) ?></td></tr>
+        <tr><th>ID No</th><td><?= e($booking['customer_id_no']) ?></td></tr>
+        <tr><th>ID Images</th><td>
+            <div class="img-grid">
+                <?= imgTag($booking['cust_id_front_image'] ?? null, 'Customer ID Front') ?>
+                <?= imgTag($booking['cust_id_back_image'] ?? null, 'Customer ID Back') ?>
+            </div>
+        </td></tr>
+        <tr><th>License Images</th><td>
+            <div class="img-grid">
+                <?= imgTag($booking['cust_license_front_image'] ?? null, 'License Front') ?>
+                <?= imgTag($booking['cust_license_back_image'] ?? null, 'License Back') ?>
+            </div>
+        </td></tr>
     </table>
 
-    <?php if ($driver): ?>
-    <div class="section-label">Driver</div>
-    <table class="review-table">
-        <tr><th>Name</th><td><?= htmlspecialchars($driver['full_name']) ?></td></tr>
-        <tr><th>Phone</th><td><?= htmlspecialchars($driver['phone_no']) ?></td></tr>
-        <tr><th>ID No</th><td><?= htmlspecialchars($driver['id_no']) ?></td></tr>
-        <tr><th>License No</th><td><?= htmlspecialchars($driver['license_no']) ?></td></tr>
-        <tr><th>Address</th><td><?= htmlspecialchars($driver['address']) ?></td></tr>
-        <tr><th>Age</th><td><?= htmlspecialchars($driver['age']) ?></td></tr>
-    </table>
-    <?php endif; ?>
-
+    <!-- Guarantor -->
     <?php if ($guarantor): ?>
-    <div class="section-label">Guarantor</div>
-    <table class="review-table">
-        <tr><th>Name</th><td><?= htmlspecialchars($guarantor['full_name']) ?></td></tr>
-        <tr><th>Phone</th><td><?= htmlspecialchars($guarantor['phone_no']) ?></td></tr>
-        <tr><th>ID No</th><td><?= htmlspecialchars($guarantor['id_no']) ?></td></tr>
-        <tr><th>Relationship</th><td><?= htmlspecialchars($guarantor['relationship']) ?></td></tr>
-    </table>
+        <div class="section-label">Guarantor</div>
+        <table class="review-table">
+            <tr><th>Name</th><td><?= e($guarantor['full_name']) ?></td></tr>
+            <tr><th>Phone</th><td><?= e($guarantor['phone_no']) ?></td></tr>
+            <tr><th>ID No</th><td><?= e($guarantor['id_no']) ?></td></tr>
+            <tr><th>Relationship</th><td><?= e($guarantor['relationship']) ?></td></tr>
+            <tr><th>ID Images</th><td>
+                <div class="img-grid">
+                    <?= imgTag($guarantor['id_front_image'] ?? null, 'Guarantor ID Front') ?>
+                    <?= imgTag($guarantor['id_back_image'] ?? null, 'Guarantor ID Back') ?>
+                </div>
+            </td></tr>
+        </table>
     <?php endif; ?>
 
-    <div class="btn-row">
-        <button class="back-btn" onclick="window.history.back()">Back</button>
+    <!-- Services -->
+    <?php if (!empty($services)): ?>
+        <div class="section-label">All Services</div>
+        <table class="review-table">
+            <tr><th>Type</th><th style="width:120px;">Fee (RM)</th><th>Location Info</th></tr>
+            <?php foreach ($services as $s): ?>
+                <tr>
+                    <td>
+                        <?php
+                          $stype = $s['service_type'];
+                          $label = match($stype) {
+                              'delivery' => 'Delivery (Drop-off Only)',
+                              'pickup_and_return' => 'Pickup & Return',
+                              'self_pickup' => 'Pickup Myself (Free)',
+                              default => ucwords(str_replace('_',' ', $stype))
+                          };
+                          echo e($label);
+                        ?>
+                        <?php if (in_array($s['service_type'], ['delivery','pickup_and_return'], true)): ?>
+                            <span class="badge-small">Core</span>
+                        <?php elseif ($s['service_type'] === 'self_pickup'): ?>
+                            <span class="badge-small" style="background:#e4fae8;color:#14773f;">Free</span>
+                        <?php else: ?>
+                            <span class="badge-small" style="background:#f0eefa;color:#5a468c;">Addon</span>
+                        <?php endif; ?>
+                    </td>
+                    <td style="text-align:right;"><?= number_format((float)$s['fee'],2) ?></td>
+                    <td>
+                        <?php
+                          $locParts = [];
+                          if (!empty($s['delivery_location'])) $locParts[] = "Drop-off: ".$s['delivery_location'];
+                          if (!empty($s['return_location']))   $locParts[] = "Pickup: ".$s['return_location'];
+                          echo e($locParts ? implode(' | ', $locParts) : '-');
+                        ?>
+                    </td>
+                </tr>
+            <?php endforeach; ?>
+        </table>
+    <?php endif; ?>
+
+    <!-- Inspection Images -->
+    <div class="section-label" id="inspection-images-anchor">Inspection Images</div>
+    <div class="inspection-wrapper">
+        <div class="filter-bar">
+            <button type="button" class="filter-btn active" data-filter="all">All</button>
+            <button type="button" class="filter-btn" data-filter="pickup">Pickup</button>
+            <button type="button" class="filter-btn" data-filter="return">Return</button>
+        </div>
+
+        <?php if (empty($pickupImages) && empty($returnImages)): ?>
+            <div class="notice">No inspection images have been uploaded yet.</div>
+        <?php else: ?>
+            <div class="inspection-groups">
+                <!-- Pickup Group -->
+                <div class="inspection-group" data-group="pickup">
+                    <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:0 0 12px;">
+                        <div style="font-weight:800;color:#2d3a5f;font-size:1em;display:flex;align-items:center;gap:10px;">
+                            Pickup Inspection
+                            <?php
+                              $badgeClass = $pickup_filled
+                                  ? (count($pickupMissing) === 0 ? 'badge-complete' : 'badge-partial')
+                                  : 'badge-incomplete';
+                              $badgeText = $pickup_filled
+                                  ? (count($pickupMissing) === 0 ? 'Complete' : 'Partial')
+                                  : 'Incomplete';
+                            ?>
+                            <span style="padding:4px 10px;border-radius:20px;font-size:.55rem;font-weight:700;letter-spacing:.5px;"
+                                  class="<?= e($badgeClass) ?>"><?= e($badgeText) ?></span>
+                        </div>
+                        <?php if ($pickup_filled): ?>
+                            <div style="font-size:.6rem;color:#4d5a6d;font-weight:600;">
+                                Mileage: <?= e($booking['pickup_mileage'] ?? '-') ?> |
+                                Fuel: <?= e($booking['pickup_fuel_percent'] ?? '-') ?>%
+                            </div>
+                        <?php endif; ?>
+                        <?php if (count($pickupMissing) > 0): ?>
+                            <div style="font-size:.62rem;color:#a03b3b;font-weight:600;">
+                                Missing: <?= e(implode(', ', array_map(fn($t)=>$imageTypeLabel[$t]??$t, $pickupMissing))) ?>
+                            </div>
+                        <?php endif; ?>
+                    </div>
+                    <?php if (!empty($pickupImages)): ?>
+                        <div class="image-cards">
+                            <?php foreach ($pickupImages as $idx => $im):
+                                $itype = strtolower($im['image_type']);
+                                $label = $imageTypeLabel[$itype] ?? ucfirst(str_replace('_',' ',$itype));
+                                $capDate = $im['inspection_date'] ? date('Y-m-d H:i', strtotime($im['inspection_date'])) : '';
+                                $uploaded = date('Y-m-d H:i', strtotime($im['uploaded_at']));
+                                $caption = 'Pickup • '.$label.($capDate?' • Inspected '.$capDate:'').' • Uploaded '.$uploaded;
+                                $dataIndex = "pickup-".$idx;
+                            ?>
+                            <div class="image-card">
+                                <div class="image-stamp">P</div>
+                                <img src="data:image/jpeg;base64,<?= base64_encode($im['image_path']) ?>"
+                                     alt="<?= e('Pickup - '.$label) ?>"
+                                     data-full="data:image/jpeg;base64,<?= base64_encode($im['image_path']) ?>"
+                                     data-caption="<?= e($caption) ?>"
+                                     data-index="<?= e($dataIndex) ?>">
+                                <div class="image-type-label"><?= e($label) ?></div>
+                                <div class="image-meta">
+                                    <?php if ($capDate): ?><div>Inspected: <?= e($capDate) ?></div><?php endif; ?>
+                                    <div>Uploaded: <?= e($uploaded) ?></div>
+                                </div>
+                            </div>
+                            <?php endforeach; ?>
+                        </div>
+                    <?php else: ?>
+                        <div class="notice">No pickup images.</div>
+                    <?php endif; ?>
+                </div>
+
+                <!-- Return Group -->
+                <div class="inspection-group" data-group="return">
+                    <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:0 0 12px;">
+                        <div style="font-weight:800;color:#2d3a5f;font-size:1em;display:flex;align-items:center;gap:10px;">
+                            Return Inspection
+                            <?php
+                              $badgeClassR = $return_inspection_done
+                                  ? (count($returnMissing) === 0 ? 'badge-complete' : 'badge-partial')
+                                  : 'badge-incomplete';
+                              $badgeTextR = $return_inspection_done
+                                  ? (count($returnMissing) === 0 ? 'Complete' : 'Partial')
+                                  : 'Incomplete';
+                            ?>
+                            <span style="padding:4px 10px;border-radius:20px;font-size:.55rem;font-weight:700;letter-spacing:.5px;"
+                                  class="<?= e($badgeClassR) ?>"><?= e($badgeTextR) ?></span>
+                        </div>
+                        <?php if ($return_inspection_done): ?>
+                            <div style="font-size:.6rem;color:#4d5a6d;font-weight:600;">
+                                Mileage: <?= e($booking['return_mileage'] ?? '-') ?> |
+                                Fuel: <?= e($booking['return_fuel_percent'] ?? '-') ?>%
+                            </div>
+                        <?php endif; ?>
+                        <?php if (count($returnMissing) > 0): ?>
+                            <div style="font-size:.62rem;color:#a03b3b;font-weight:600;">
+                                Missing: <?= e(implode(', ', array_map(fn($t)=>$imageTypeLabel[$t]??$t, $returnMissing))) ?>
+                            </div>
+                        <?php endif; ?>
+                    </div>
+                    <?php if (!empty($returnImages)): ?>
+                        <div class="image-cards">
+                            <?php foreach ($returnImages as $idx => $im):
+                                $itype = strtolower($im['image_type']);
+                                $label = $imageTypeLabel[$itype] ?? ucfirst(str_replace('_',' ',$itype));
+                                $capDate = $im['inspection_date'] ? date('Y-m-d H:i', strtotime($im['inspection_date'])) : '';
+                                $uploaded = date('Y-m-d H:i', strtotime($im['uploaded_at']));
+                                $caption = 'Return • '.$label.($capDate?' • Inspected '.$capDate:'').' • Uploaded '.$uploaded;
+                                $dataIndex = "return-".$idx;
+                            ?>
+                            <div class="image-card">
+                                <div class="image-stamp" style="background:rgba(24,90,180,.65);">R</div>
+                                <img src="data:image/jpeg;base64,<?= base64_encode($im['image_path']) ?>"
+                                     alt="<?= e('Return - '.$label) ?>"
+                                     data-full="data:image/jpeg;base64,<?= base64_encode($im['image_path']) ?>"
+                                     data-caption="<?= e($caption) ?>"
+                                     data-index="<?= e($dataIndex) ?>">
+                                <div class="image-type-label"><?= e($label) ?></div>
+                                <div class="image-meta">
+                                    <?php if ($capDate): ?><div>Inspected: <?= e($capDate) ?></div><?php endif; ?>
+                                    <div>Uploaded: <?= e($uploaded) ?></div>
+                                </div>
+                            </div>
+                            <?php endforeach; ?>
+                        </div>
+                    <?php else: ?>
+                        <div class="notice">No return images.</div>
+                    <?php endif; ?>
+                </div>
+            </div>
+        <?php endif; ?>
+    </div>
+
+    <div class="notice" style="margin-top:18px;">
+        Click ANY thumbnail (car, ID, license, guarantor, inspection) to view full size. Use arrow keys or buttons to navigate.
+    </div>
+
+    <a class="back-btn" href="bookings.php">Back to Bookings</a>
+</div>
+
+<!-- Modal -->
+<div id="imgModal">
+    <button type="button" class="close-btn" id="closeModalBtn">Close (Esc)</button>
+    <button type="button" class="nav-btn prev-btn nav-prev" id="prevImgBtn">&#10094; Prev</button>
+    <button type="button" class="nav-btn next-btn nav-next" id="nextImgBtn">Next &#10095;</button>
+    <div style="display:flex;flex-direction:column;align-items:center;">
+        <img id="modalImg" src="" alt="Full Image">
+        <div class="modal-caption" id="modalCaption"></div>
     </div>
 </div>
+
+<script>
+(function(){
+  // Reject toggle
+  const showRejectBtn = document.getElementById('showRejectBtn');
+  if (showRejectBtn){
+    const rejectInput = document.getElementById('rejectionReason');
+    const confirmBtn = document.getElementById('confirmRejectBtn');
+    showRejectBtn.addEventListener('click', ()=>{
+      showRejectBtn.style.display='none';
+      rejectInput.style.display='inline-block';
+      confirmBtn.style.display='inline-flex';
+      rejectInput.focus();
+    });
+    confirmBtn.addEventListener('click', e=>{
+      if(!rejectInput.value.trim()){
+        e.preventDefault();
+        rejectInput.style.borderColor='#e54848';
+        rejectInput.focus();
+      }
+    });
+    rejectInput.addEventListener('input', ()=> rejectInput.style.borderColor='#d4deed');
+    const form = document.getElementById('feeForm');
+    if(form){
+      form.addEventListener('submit', ev=>{
+        const btnVal = ev.submitter ? ev.submitter.value : '';
+        const feeEl = document.getElementById('service_fee');
+        if((btnVal==='approve' || btnVal==='save_fee') && feeEl && !feeEl.disabled){
+          const v = feeEl.value.trim();
+          if(v==='' || isNaN(v)){
+            alert('Please enter a numeric fee.');
+            ev.preventDefault();
+          }
+        }
+      });
+    }
+  }
+
+  // Filter groups
+  document.querySelectorAll('.filter-btn').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      document.querySelectorAll('.filter-btn').forEach(b=>b.classList.remove('active'));
+      btn.classList.add('active');
+      const val = btn.getAttribute('data-filter');
+      document.querySelectorAll('.inspection-group').forEach(g=>{
+        g.style.display = (val==='all' || g.getAttribute('data-group')===val) ? '' : 'none';
+      });
+    });
+  });
+
+  // Build gallery
+  const modal = document.getElementById('imgModal');
+  const modalImg = document.getElementById('modalImg');
+  const modalCaption = document.getElementById('modalCaption');
+  const closeBtn = document.getElementById('closeModalBtn');
+  const prevBtn = document.getElementById('prevImgBtn');
+  const nextBtn = document.getElementById('nextImgBtn');
+  let gallery = [];
+  let current = -1;
+
+  function buildGallery(){
+    gallery = [];
+    let idx=0;
+    // Inspection images
+    document.querySelectorAll('.image-card img').forEach(img=>{
+      const src = img.getAttribute('data-full') || img.src;
+      const caption = img.getAttribute('data-caption') || img.alt || 'Inspection Image';
+      const marker = 'ins-'+idx;
+      img.dataset.galleryIndex = marker;
+      gallery.push({src, caption, marker});
+      idx++;
+    });
+    // Other doc thumbnails (car, id, license, guarantor)
+    document.querySelectorAll('.img-grid .img-thumb, .car-img-thumb').forEach(img=>{
+      if (img.dataset.galleryIndex) return;
+      // Skip placeholder if not actual <img>
+      if (!(img instanceof HTMLImageElement)) return;
+      const src = img.getAttribute('data-full') || img.src;
+      const caption = img.alt || 'Image';
+      const marker = 'doc-'+idx;
+      img.dataset.galleryIndex = marker;
+      gallery.push({src, caption, marker});
+      idx++;
+    });
+  }
+  buildGallery();
+
+  function openByIndex(i){
+    if(i<0 || i>=gallery.length) return;
+    current=i;
+    const item=gallery[i];
+    modalImg.src=item.src;
+    modalCaption.innerHTML='<span>'+(i+1)+' / '+gallery.length+'</span> &nbsp;'+item.caption;
+    modal.style.display='flex';
+  }
+  function openByMarker(m){
+    const i=gallery.findIndex(g=>g.marker===m);
+    if(i!==-1) openByIndex(i);
+  }
+  function closeModal(){
+    modal.style.display='none';
+    modalImg.src='';
+    current=-1;
+  }
+  function next(){
+    if(current===-1) return;
+    openByIndex((current+1)%gallery.length);
+  }
+  function prev(){
+    if(current===-1) return;
+    openByIndex((current-1+gallery.length)%gallery.length);
+  }
+
+  document.addEventListener('click', e=>{
+    const img = e.target.closest('img[data-gallery-index], .image-card img');
+    if (img && img.dataset.galleryIndex){
+      openByMarker(img.dataset.galleryIndex);
+      return;
+    }
+    if (e.target===modal || e.target===closeBtn) closeModal();
+    else if (e.target===prevBtn) prev();
+    else if (e.target===nextBtn) next();
+  });
+
+  document.addEventListener('keyup', e=>{
+    if (modal.style.display==='flex'){
+      if (e.key==='Escape') closeModal();
+      if (e.key==='ArrowRight') next();
+      if (e.key==='ArrowLeft') prev();
+    }
+  });
+})();
+</script>
+
 <?php include '../includes/footer.php'; ?>
+</body>
+</html>

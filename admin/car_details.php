@@ -1,491 +1,199 @@
 <?php
-include '../connect.php';
+/*
+ * car_details.php (Read-Only)
+ * Features:
+ *  - Shows basic car info
+ *  - Primary image (first by sort_order,id)
+ *  - Document download links (grant / roadtax / covernote)
+ *  - Links to edit page & back to list
+ */
+
+require_once '../connect.php';
 session_start();
 
-if (!isset($_SESSION['admin_id'])) {
+if (empty($_SESSION['admin_id'])) {
     header("Location: admin_login.php");
     exit;
 }
 
-if (!isset($_GET['id']) || !is_numeric($_GET['id'])) {
+if (empty($_GET['id']) || !ctype_digit($_GET['id'])) {
     echo "<div style='padding:40px;text-align:center;color:#b33;'>Invalid car ID.</div>";
     exit;
 }
-$car_id = intval($_GET['id']);
+$car_id = (int)$_GET['id'];
 
-// Handle image upload (add or update)
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['upload_image'])) {
-    if (isset($_FILES['car_image']) && $_FILES['car_image']['error'] === UPLOAD_ERR_OK) {
-        $fileData = file_get_contents($_FILES['car_image']['tmp_name']);
-        $image_type = $_POST['image_type'] ?? 'main';
-
-        // If an image already exists, update it (replace the first one)
-        $check = $conn->query("SELECT car_image_id FROM car_image WHERE car_id = $car_id ORDER BY car_image_id ASC LIMIT 1");
-        if ($check && $img = $check->fetch_assoc()) {
-            $conn->query("UPDATE car_image SET image_path='" . $conn->real_escape_string($fileData) . "', image_type='" . $conn->real_escape_string($image_type) . "', uploaded_at=NOW() WHERE car_image_id=" . $img['car_image_id']);
-        } else {
-            $conn->query("INSERT INTO car_image (car_id, image_type, image_path, uploaded_at) VALUES ($car_id, '" . $conn->real_escape_string($image_type) . "', '" . $conn->real_escape_string($fileData) . "', NOW())");
-        }
-        header("Location: car_details.php?id=$car_id&img_upload=success");
-        exit;
-    }
+function statusBadge(string $s): array {
+    return (strtolower($s)==='available') ? ['Available',''] : ['Not Available',' not-available'];
 }
 
-// Update car documents if form submitted
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['upload_docs'])) {
-    $fields = [
-        'car_grant_path' => 'grant_file',
-        'car_roadtax_path' => 'roadtax_file',
-        'car_covernote_path' => 'covernote_file'
-    ];
-    $updates = [];
-    foreach ($fields as $db_field => $input_name) {
-        if (isset($_FILES[$input_name]) && $_FILES[$input_name]['error'] === UPLOAD_ERR_OK) {
-            $fileData = file_get_contents($_FILES[$input_name]['tmp_name']);
-            $updates[] = "$db_field = '" . $conn->real_escape_string($fileData) . "'";
-        }
-    }
-    if ($updates) {
-        $conn->query("UPDATE car SET " . implode(',', $updates) . " WHERE car_id = $car_id");
-        header("Location: car_details.php?id=$car_id&doc_upload=success");
-        exit;
-    }
-}
-
-// Delete car
-if (isset($_POST['delete_car'])) {
-    $conn->query("DELETE FROM car WHERE car_id = $car_id");
-    $conn->query("DELETE FROM car_image WHERE car_id = $car_id");
-    // Optionally delete bookings, etc.
-    header("Location: cars.php?delete=success");
+/* Fetch car (blob presence via IS NOT NULL + length check) */
+$sqlCar = "
+    SELECT car_id, car_brand, car_model, year, color, mileage, plate_no,
+           transmission, seat_capacity, status, daily_rate, images_version,
+           (car_grant_blob     IS NOT NULL AND OCTET_LENGTH(car_grant_blob)     > 0) AS has_grant,
+           (car_roadtax_blob   IS NOT NULL AND OCTET_LENGTH(car_roadtax_blob)   > 0) AS has_roadtax,
+           (car_covernote_blob IS NOT NULL AND OCTET_LENGTH(car_covernote_blob) > 0) AS has_covernote
+    FROM car
+    WHERE car_id=? LIMIT 1
+";
+$stmt = $conn->prepare($sqlCar);
+if (!$stmt) {
+    error_log("CAR_DETAILS prepare fail: ".$conn->error);
+    echo "<div style='padding:40px;text-align:center;color:#b33;'>System error.</div>";
     exit;
 }
+$stmt->bind_param('i', $car_id);
+$stmt->execute();
+$res = $stmt->get_result();
+$car = $res?->fetch_assoc();
+$stmt->close();
 
-// Get car info
-$car_sql = "SELECT * FROM car WHERE car_id = $car_id";
-$car_result = $conn->query($car_sql);
-if (!$car_result || !$car_result->num_rows) {
+if (!$car) {
     echo "<div style='padding:40px;text-align:center;color:#b33;'>Car not found.</div>";
     exit;
 }
-$car = $car_result->fetch_assoc();
 
-// Get car images
-$img_sql = "SELECT * FROM car_image WHERE car_id = $car_id ORDER BY car_image_id ASC";
-$img_result = $conn->query($img_sql);
-$images = [];
-while ($img_row = $img_result->fetch_assoc()) {
-    $images[] = $img_row;
-}
+/* Fetch primary image only (id + version) */
+$stmt = $conn->prepare("
+    SELECT car_image_id, version
+    FROM car_image
+    WHERE car_id=?
+    ORDER BY sort_order ASC, car_image_id ASC
+    LIMIT 1
+");
+$stmt->bind_param('i', $car_id);
+$stmt->execute();
+$primaryImage = $stmt->get_result()->fetch_assoc();
+$stmt->close();
 
-// Document download link function (uses ID and field, not base64)
-function docDownloadLink($car_id, $blob, $field, $label) {
-    if (!$blob) return '-';
-    return "<a href='download_doc.php?car_id=$car_id&field=$field&name=$label' target='_blank'>$label</a>";
-}
+[$statusLabel, $statusClass] = statusBadge($car['status']);
 
-// Prepare customer name lookup
-$customerNames = [];
-$cust_sql = "SELECT cust_id, full_name FROM customer";
-$cust_res = $conn->query($cust_sql);
-while ($cust_res && $row = $cust_res->fetch_assoc()) {
-    $customerNames[$row['cust_id']] = $row['full_name'];
-}
-
-// --- Booking history pagination ---
-$per_page = 5;
-$page = isset($_GET['page']) && is_numeric($_GET['page']) && $_GET['page'] > 0 ? intval($_GET['page']) : 1;
-$offset = ($page - 1) * $per_page;
-
-// Get total bookings count
-$count_sql = "SELECT COUNT(*) as total FROM booking WHERE car_id = $car_id";
-$count_result = $conn->query($count_sql);
-$total_bookings = 0;
-if ($count_result && $row = $count_result->fetch_assoc()) {
-    $total_bookings = $row['total'];
-}
-$total_pages = ceil($total_bookings / $per_page);
-
-// Fetch bookings for this page
-$booking_sql = "SELECT * FROM booking WHERE car_id = $car_id ORDER BY return_datetime DESC LIMIT $per_page OFFSET $offset";
-$booking_result = $conn->query($booking_sql);
-$bookings = [];
-if ($booking_result) {
-    while ($row = $booking_result->fetch_assoc()) {
-        $bookings[] = $row;
-    }
-}
+include 'admin_header.php';
 ?>
-<?php include 'admin_header.php'; ?>
-
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Car Details</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
-.car-details-container {
-    max-width: 900px;
-    margin: 40px auto 30px auto;
-    background: #fff;
-    border-radius: 12px;
-    box-shadow: 0 2px 16px #e0e7ef33;
-    padding: 32px 30px 28px 30px;
+:root {
+    --brand-blue:#304cc3;
+    --border:#e4e8f3;
+    --bg-light:#f7fafc;
+    --text-dark:#1f3455;
+    --text-mid:#5874a8;
 }
-.car-details-title {
-    font-size: 2em;
-    font-weight: 800;
-    color: #1f3455;
-    letter-spacing: 0.5px;
-    margin-bottom: 11px;
-}
-.car-details-plate {
-    font-size: 1.13em;
-    color: #5874a8;
-    font-weight: 600;
-    margin-bottom: 14px;
-}
-.car-details-status {
-    display: inline-block;
-    margin-bottom: 20px;
-    padding: 4px 19px;
-    font-size: 1em;
-    border-radius: 14px;
-    font-weight: 700;
-    letter-spacing: 0.2px;
-    background: #e6fcf3;
-    color: #2bbf5f;
-}
-.car-details-status.not-available {
-    background: #ffeded;
-    color: #e54848;
-}
-.car-details-actions {
-    display: flex;
-    gap: 32px;
-    margin: 13px 0 25px 0;
-}
-.action-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 120px;
-    height: 60px;
-    padding: 0;
-    font-size: 1.18em;
-    font-weight: 600;
-    border-radius: 12px;
-    border: 2px solid transparent;
-    text-decoration: none;
-    transition: background 0.13s, color 0.13s, border 0.13s;
-    cursor: pointer;
-    box-sizing: border-box;
-}
-.edit-btn {
-    background: #f1f5fb;
-    color: #2563eb;
-    border: 2px solid #e2e8f0;
-}
-.edit-btn:hover {
-    background: #e6f1fd;
-    color: #183c7c;
-    border-color: #b0c4e6;
-}
-.delete-btn {
-    background: #fff4f4;
-    color: #c32e2e;
-    border: 2px solid #efb1b1;
-}
-.delete-btn:hover {
-    background: #ffe3e3;
-    color: #a51818;
-    border-color: #e48d8d;
-}
-.car-details-actions form {
-    margin: 0;
-    padding: 0;
-    display: inline;
-}
-.car-details-actions form button {
-    font-family: inherit;
-    font-size: 1.18em;
-    font-weight: 600;
-    width: 120px;
-    height: 60px;
-    padding: 0;
-    border-radius: 12px;
-    border: 2px solid #efb1b1;
-    background: #fff4f4;
-    color: #c32e2e;
-    transition: background 0.13s, color 0.13s, border 0.13s;
-    box-sizing: border-box;
-    cursor: pointer;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-}
-.car-details-actions form button:hover {
-    background: #ffe3e3;
-    color: #a51818;
-    border-color: #e48d8d;
-}
-.car-details-section-title {
-    color: #304cc3;
-    font-weight: 700;
-    font-size: 1.12em;
-    margin: 26px 0 7px 0;
-    letter-spacing: 0.2px;
-}
-.car-details-table {
-    width: 100%;
-    border-collapse: collapse;
-    margin: 25px 0 20px 0;
-    font-size: 1.05em;
-}
-.car-details-table td {
-    padding: 9px 14px;
-    border-bottom: 1px solid #eef2fa;
-    vertical-align: top;
-}
-.car-details-table tr:last-child td { border-bottom: none; }
-.car-img-gallery {
-    display: flex;
-    gap: 16px;
-    margin: 12px 0 24px 0;
-    flex-wrap: wrap;
-}
-.car-img-gallery img {
-    width: 120px;
-    height: 80px;
-    object-fit: cover;
-    border-radius: 8px;
-    border: 1.5px solid #e4e8f3;
-    background: #f7fafc;
-    box-shadow: 0 1.5px 8px #e0e7ef33;
-    cursor: pointer;
-    transition: transform 0.14s;
-}
-.car-img-gallery img:hover {
-    transform: scale(1.09);
-    z-index: 2;
-}
-.car-details-section-upload, .car-details-section-img-upload {
-    margin: 9px 0 19px 0;
-    background: #f9fafd;
-    border-radius: 8px;
-    padding: 13px 19px 10px 19px;
-    box-shadow: 0 1.5px 7px #e7e7ef33;
-}
-.car-details-section-upload label, .car-details-section-img-upload label {
-    font-weight: 600;
-    color: #344e88;
-    display: block;
-    margin-bottom: 7px;
-}
-.car-details-section-upload input[type="file"],
-.car-details-section-img-upload input[type="file"] {
-    margin-bottom: 11px;
-}
-.car-details-section-upload button,
-.car-details-section-img-upload button {
-    background: #304cc3;
-    color: #fff;
-    border: none;
-    border-radius: 7px;
-    padding: 7px 18px;
-    font-size: 1em;
-    font-weight: 600;
-    cursor: pointer;
-}
-.car-details-section-upload button:hover,
-.car-details-section-img-upload button:hover {
-    background: #1b2d70;
-}
-.booking-history-table {
-    width: 100%;
-    border-collapse: collapse;
-    margin: 12px 0 0 0;
-    font-size: 1.01em;
-}
-.booking-history-table th, .booking-history-table td {
-    border-bottom: 1px solid #e9e9f2;
-    padding: 8px 9px;
-    text-align: left;
-}
-.booking-history-table th {
-    background: #f7fafd;
-    color: #304cc3;
-    font-weight: 700;
-}
-.booking-history-table tr:last-child td { border-bottom: none; }
-.booking-pagination {
-    display: flex;
-    justify-content: flex-end;
-    align-items: center;
-    gap: 7px;
-    margin-top: 9px;
-    margin-bottom: 6px;
-    font-size: 1.02em;
-}
-.booking-pagination a, .booking-pagination span {
-    padding: 5px 13px;
-    border-radius: 7px;
-    text-decoration: none;
-    color: #304cc3;
-    background: #f7fafd;
-    border: 1.2px solid #e1e8f7;
-    font-weight: 600;
-    transition: background 0.14s;
-    margin-left: 2px;
-}
-.booking-pagination a.current, .booking-pagination span.current {
-    background: #304cc3;
-    color: #fff;
-    border-color: #304cc3;
-}
-.booking-pagination a:hover:not(.current) {
-    background: #e6f1fd;
-    color: #183c7c;
-}
-@media (max-width: 700px) {
-    .car-details-container { padding: 14px 4vw 18px 4vw;}
-    .car-img-gallery img { width: 90px; height: 60px;}
+body { font-family: system-ui, Arial, sans-serif; background:#f1f5fa; margin:0; }
+.car-details-container { max-width: 980px; margin: 40px auto 50px; background:#fff; border-radius:16px; box-shadow:0 4px 16px -4px rgba(0,0,0,.08); padding:40px 42px 48px; }
+.header-row { display:flex; flex-wrap:wrap; justify-content:space-between; gap:20px; }
+.title-block h1 { margin:0; font-size:2.15em; font-weight:800; color:var(--text-dark); letter-spacing:.5px; }
+.title-block .plate { font-size:1.02em; color:var(--text-mid); font-weight:600; margin-top:6px; }
+.status-badge { display:inline-block; margin-top:14px; padding:6px 22px; font-size:0.9em; font-weight:700; letter-spacing:.25px; border-radius:18px; background:#e6fcf3; color:#2bbf5f; }
+.status-badge.not-available { background:#ffeded; color:#e54848; }
+.actions { display:flex; gap:12px; align-items:flex-start; }
+.actions a { text-decoration:none; background:var(--brand-blue); color:#fff; padding:10px 20px; border-radius:9px; font-weight:600; font-size:0.9em; box-shadow:0 2px 6px rgba(48,76,195,0.15); transition:background .15s; }
+.actions a:hover { background:#20398e; }
+.details-table { width:100%; border-collapse:collapse; margin:34px 0 10px; }
+.details-table td { padding:12px 16px; border-bottom:1px solid #eef2f7; vertical-align:top; font-size:0.95em; }
+.details-table tr:last-child td { border-bottom:none; }
+.details-table b { color:#20324f; font-weight:600; }
+.section-title { margin:40px 0 16px; font-size:1.15em; font-weight:700; letter-spacing:.3px; color:var(--brand-blue); }
+.primary-image-box { width:300px; height:200px; border:1.5px solid var(--border); border-radius:14px; background:var(--bg-light); box-shadow:0 2px 10px -3px rgba(0,0,0,.08); display:flex; align-items:center; justify-content:center; overflow:hidden; }
+.primary-image-box img { width:100%; height:100%; object-fit:cover; cursor:pointer; display:block; }
+.empty-note { color:#888; font-size:0.9em; }
+.doc-grid { display:flex; flex-wrap:wrap; gap:30px; font-size:0.9em; }
+.doc-item b { display:block; margin-bottom:6px; color:#20324f; font-weight:600; font-size:0.75rem; letter-spacing:.5px; text-transform:uppercase; }
+.doc-item a { color:#1a53b8; text-decoration:none; font-weight:600; font-size:0.9em; }
+.doc-item a:hover { text-decoration:underline; }
+.back-links { margin-top:46px; font-size:0.9em; }
+.back-links a { color:var(--brand-blue); text-decoration:none; font-weight:600; margin-right:18px; }
+.back-links a:hover { text-decoration:underline; }
+@media (max-width:780px) {
+    .car-details-container { padding:32px 26px 40px; }
+    .primary-image-box { width:100%; height:240px; }
+    .details-table td { padding:10px 12px; }
 }
 </style>
-
+</head>
+<body>
 <div class="car-details-container">
-    <div class="car-details-title"><?= strtoupper(htmlspecialchars($car['car_brand'])) ?> <?= htmlspecialchars($car['car_model']) ?></div>
-    <div class="car-details-plate"><?= htmlspecialchars($car['plate_no']) ?></div>
-    <?php
-        // Only show "Available" or "Not Available"
-        $car_status = strtolower($car['status']) == "available" ? "available" : "not available";
-        $status_class = $car_status == "available" ? "" : " not-available";
-    ?>
-    <span class="car-details-status<?= $status_class ?>">
-        <?= ucfirst($car_status) ?>
-    </span>
 
-    <div class="car-details-actions">
-        <a href="edit_car.php?id=<?= $car['car_id'] ?>" class="action-btn edit-btn">Edit</a>
-        <form method="post" style="display:inline;">
-            <input type="hidden" name="delete_car" value="1" />
-            <button type="submit" class="action-btn delete-btn">Delete</button>
-        </form>
+    <div class="header-row">
+        <div class="title-block">
+            <h1><?= strtoupper(htmlspecialchars($car['car_brand'])) ?> <?= htmlspecialchars($car['car_model']) ?></h1>
+            <div class="plate"><?= htmlspecialchars($car['plate_no']) ?></div>
+            <span class="status-badge<?= $statusClass ?>"><?= htmlspecialchars($statusLabel) ?></span>
+        </div>
+        <div class="actions">
+            <a href="edit_car.php?id=<?= $car_id ?>">Edit Car</a>
+            <a href="cars.php">Back to List</a>
+        </div>
     </div>
 
-    <div class="car-details-section-title">Details</div>
-    <table class="car-details-table">
+    <table class="details-table">
         <tr>
-            <td><b>Year</b></td>
-            <td><?= htmlspecialchars($car['year']) ?></td>
-            <td><b>Color</b></td>
-            <td><?= htmlspecialchars($car['color']) ?></td>
+            <td><b>Brand</b></td><td><?= htmlspecialchars($car['car_brand']) ?></td>
+            <td><b>Model</b></td><td><?= htmlspecialchars($car['car_model']) ?></td>
         </tr>
         <tr>
-            <td><b>Transmission</b></td>
-            <td><?= htmlspecialchars($car['transmission']) ?></td>
-            <td><b>Seat Capacity</b></td>
-            <td><?= htmlspecialchars($car['seat_capacity']) ?></td>
+            <td><b>Year</b></td><td><?= (int)$car['year'] ?></td>
+            <td><b>Color</b></td><td><?= htmlspecialchars($car['color']) ?></td>
         </tr>
         <tr>
-            <td><b>Mileage (km)</b></td>
-            <td><?= htmlspecialchars($car['mileage']) ?></td>
-            <td><b>Daily Rate (RM)</b></td>
-            <td><?= number_format($car['daily_rate'], 2) ?></td>
+            <td><b>Transmission</b></td><td><?= htmlspecialchars(ucfirst($car['transmission'])) ?></td>
+            <td><b>Seat Capacity</b></td><td><?= (int)$car['seat_capacity'] ?></td>
         </tr>
         <tr>
-            <td><b>Hourly Rate (RM)</b></td>
-            <td><?= number_format($car['hourly_rate'], 2) ?></td>
-            <td></td>
-            <td></td>
+            <td><b>Mileage (km)</b></td><td><?= (int)$car['mileage'] ?></td>
+            <td><b>Daily Rate (RM)</b></td><td><?= number_format((float)$car['daily_rate'], 2) ?></td>
         </tr>
     </table>
 
-    <div class="car-details-section-title">Images</div>
-    <div class="car-img-gallery">
-        <?php if (empty($images)): ?>
-            <span style="color:#999;">No images uploaded.</span>
-        <?php else: foreach ($images as $img): ?>
-            <img src="data:image/jpeg;base64,<?= base64_encode($img['image_path']) ?>"
-                 alt="Car image"
-                 onclick="window.open(this.src, '_blank')" />
-        <?php endforeach; endif; ?>
-    </div>
-    <div class="car-details-section-img-upload">
-        <form method="post" enctype="multipart/form-data">
-            <label for="car_image"><?= empty($images) ? "Add Car Image" : "Update Car Image" ?> (jpg/jpeg/png)</label>
-            <input type="file" name="car_image" id="car_image" accept="image/*" required>
-            <input type="hidden" name="image_type" value="main">
-            <button type="submit" name="upload_image"><?= empty($images) ? "Add Image" : "Update Image" ?></button>
-        </form>
-    </div>
-
-    <div class="car-details-section-title">Documents</div>
-    <div class="car-details-section-upload">
-        <form method="post" enctype="multipart/form-data">
-            <label for="grant_file">Grant (pdf/image)</label>
-            <input type="file" name="grant_file" id="grant_file" accept="application/pdf,image/*">
-            <?= docDownloadLink($car['car_id'], $car['car_grant_path'], "car_grant_path", "Grant") ?><br>
-
-            <label for="roadtax_file">Roadtax (pdf/image)</label>
-            <input type="file" name="roadtax_file" id="roadtax_file" accept="application/pdf,image/*">
-            <?= docDownloadLink($car['car_id'], $car['car_roadtax_path'], "car_roadtax_path", "Roadtax") ?><br>
-
-            <label for="covernote_file">Covernote (pdf/image)</label>
-            <input type="file" name="covernote_file" id="covernote_file" accept="application/pdf,image/*">
-            <?= docDownloadLink($car['car_id'], $car['car_covernote_path'], "car_covernote_path", "Covernote") ?><br>
-
-            <button type="submit" name="upload_docs">Upload/Replace</button>
-        </form>
-    </div>
-
-    <div class="car-details-section-title">Booking History</div>
-
-
-    <table class="booking-history-table">
-        <tr>
-            <th>#</th>
-            <th>Customer</th>
-            <th>Start Date</th>
-            <th>End Date</th>
-            <th>Mileage Before</th>
-            <th>Mileage After</th>
-            <th>Status</th>
-        </tr>
-        <?php if (empty($bookings)): ?>
-        <tr><td colspan="7" style="color:#999;">No booking history.</td></tr>
-        <?php else: foreach ($bookings as $i => $b): ?>
-        <tr>
-            <td><?= $offset + $i + 1 ?></td>
-            <td><?= htmlspecialchars($customerNames[$b['cust_id']] ?? $b['cust_id']) ?></td>
-            <td><?= htmlspecialchars($b['pickup_datetime']) ?></td>
-            <td><?= htmlspecialchars($b['return_datetime']) ?></td>
-            <td><?= htmlspecialchars($b['pickup_mileage']) ?></td>
-            <td><?= htmlspecialchars($b['return_mileage']) ?></td>
-            <td><?= htmlspecialchars($b['status']) ?></td>
-        </tr>
-        <?php endforeach; endif; ?>
-    </table>
-
-    <?php if ($total_pages > 1): ?>
-    <div class="booking-pagination">
-        <?php if ($page > 1): ?>
-            <a href="?id=<?= $car_id ?>&page=<?= $page-1 ?>">&laquo; Prev</a>
-        <?php endif; ?>
-        <?php
-        // Show max 5 page links around current
-        $start = max(1, $page - 2);
-        $end = min($total_pages, $page + 2);
-        if ($start > 1) echo '<span>...</span>';
-        for ($p = $start; $p <= $end; $p++): ?>
-            <?php if ($p == $page): ?>
-                <span class="current"><?= $p ?></span>
-            <?php else: ?>
-                <a href="?id=<?= $car_id ?>&page=<?= $p ?>"><?= $p ?></a>
-            <?php endif; ?>
-        <?php endfor;
-        if ($end < $total_pages) echo '<span>...</span>';
-        ?>
-        <?php if ($page < $total_pages): ?>
-            <a href="?id=<?= $car_id ?>&page=<?= $page+1 ?>">Next &raquo;</a>
-        <?php endif; ?>
-    </div>
+    <div class="section-title">Primary Image</div>
+    <?php if ($primaryImage): ?>
+        <div class="primary-image-box">
+            <img src="car_image.php?id=<?= (int)$primaryImage['car_image_id'] ?>&v=<?= (int)$primaryImage['version'] ?>"
+                 alt="Car image" onclick="window.open(this.src,'_blank')">
+        </div>
+    <?php else: ?>
+        <div class="empty-note">No image uploaded.</div>
     <?php endif; ?>
-</div>
 
+    <div class="section-title">Documents</div>
+    <div class="doc-grid">
+        <div class="doc-item">
+            <b>Grant</b>
+            <?php if ($car['has_grant']): ?>
+                <a href="download_doc.php?car_id=<?= $car_id ?>&field=car_grant_blob&name=Grant&v=<?= strtotime($car['updated_at']) ?>" target="_blank">Download</a>
+            <?php else: ?>
+                <span class="empty-note">None</span>
+            <?php endif; ?>
+        </div>
+        <div class="doc-item">
+            <b>Roadtax</b>
+            <?php if ($car['has_roadtax']): ?>
+                <a href="download_doc.php?car_id=<?= $car_id ?>&field=car_roadtax_blob&name=Roadtax&v=<?= strtotime($car['updated_at']) ?>" target="_blank">Download</a>
+            <?php else: ?>
+                <span class="empty-note">None</span>
+            <?php endif; ?>
+        </div>
+        <div class="doc-item">
+            <b>Covernote</b>
+            <?php if ($car['has_covernote']): ?>
+                <a href="download_doc.php?car_id=<?= $car_id ?>&field=car_covernote_blob&name=Covernote&v=<?= strtotime($car['updated_at']) ?>" target="_blank">Download</a>
+            <?php else: ?>
+                <span class="empty-note">None</span>
+            <?php endif; ?>
+        </div>
+    </div>
+
+    <div class="back-links">
+        <a href="edit_car.php?id=<?= $car_id ?>">Edit Car</a>
+        <a href="cars.php">Back to List</a>
+    </div>
+
+</div>
 <?php include '../includes/footer.php'; ?>
+</body>
+</html>
