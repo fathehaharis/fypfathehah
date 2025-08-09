@@ -1,3 +1,9 @@
+<?php
+// (Existing code) Make sure session + DB connection happen somewhere before usage
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -191,6 +197,18 @@
         font-weight: 600;
         border-top: 1px solid #eee;
       }
+      /* ADDED: small badge for refund count */
+      .menu-badge {                /* ADDED */
+        background:#e54848;        /* ADDED */
+        color:#fff;                /* ADDED */
+        padding:2px 6px;           /* ADDED */
+        font-size:11px;            /* ADDED */
+        border-radius:10px;        /* ADDED */
+        margin-left:8px;           /* ADDED */
+        font-weight:600;           /* ADDED */
+        line-height:1;             /* ADDED */
+        display:inline-block;      /* ADDED */
+      }                            /* ADDED */
       @media (max-width: 700px) {
         .header-bar {
           padding: 14px 0 10px 0;
@@ -267,6 +285,17 @@
               $notif_items[] = $row;
               $notif_count++;
           }
+
+          // ADDED: get refund pending count (badge). 
+          // If you later add a user_unread column use: WHERE cust_id=$cid AND user_unread=1
+          $refund_count = 0; // ADDED
+          $ref_q = "SELECT COUNT(*) AS c FROM refunds WHERE cust_id = $cid AND refund_status IN ('pending')"; // ADDED
+          if ($ref_res = $conn->query($ref_q)) { // ADDED
+              $rrow = $ref_res->fetch_assoc();   // ADDED
+              $refund_count = (int)$rrow['c'];   // ADDED
+          }                                      // ADDED
+      } else {
+          $refund_count = 0; // ADDED
       }
       ?>
       <div class="notif-dropdown">
@@ -303,6 +332,14 @@
           <a href="/customer/profile.php">Profile</a>
           <a href="/customer/bookings.php">My Bookings</a>
           <a href="/customer/dashboard.php">Dashboard</a>
+          <!-- ADDED: Refunds link with optional badge -->
+          <a href="/customer/my_refunds.php">
+            Refunds
+            <?php if (!empty($refund_count)): ?>
+              <span class="menu-badge"><?= $refund_count ?></span>
+            <?php endif; ?>
+          </a>
+          <!-- END ADDED -->
           <a href="/customer/logout.php" class="logout-link">Logout</a>
         </div>
       </div>
