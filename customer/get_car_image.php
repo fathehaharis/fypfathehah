@@ -1,38 +1,43 @@
 <?php
-ini_set('display_errors', 1);
-error_reporting(E_ALL);
+// Public/customer image endpoint.
+// Security considerations:
+//  - If you want to hide images of unavailable cars, join to car and check status='available'.
+//  - For now, we just serve if the ID exists.
 
-include '../connect.php';
+require '../connect.php';
 
-if (!isset($_GET['car_image_id'])) {
+$car_image_id = (int)($_GET['car_image_id'] ?? 0);
+if ($car_image_id <= 0) {
     http_response_code(400);
-    exit("No car_image_id provided");
+    exit;
 }
 
-$id = intval($_GET['car_image_id']);
-$stmt = $conn->prepare("SELECT image_path FROM car_image WHERE car_image_id = ?");
-$stmt->bind_param("i", $id);
+$sql = "SELECT ci.image_blob
+        FROM car_image ci
+        WHERE ci.car_image_id = ?
+        LIMIT 1";
+$stmt = $conn->prepare($sql);
+$stmt->bind_param('i', $car_image_id);
 $stmt->execute();
 $stmt->store_result();
-$stmt->bind_result($img);
-
-if ($stmt->num_rows > 0 && $stmt->fetch() && !empty($img)) {
-    // Optional: Save to disk for debugging
-    // file_put_contents("debug_output_image.bin", $img);
-
-    // Detect content type
-    if (substr($img, 0, 8) === "\x89PNG\x0D\x0A\x1A\x0A") {
-        header("Content-Type: image/png");
-    } else if (substr($img, 0, 3) === "\xFF\xD8\xFF") {
-        header("Content-Type: image/jpeg");
-    } else {
-        header("Content-Type: application/octet-stream");
-    }
-    header("Content-Length: " . strlen($img));
-    echo $img;
-} else {
-    http_response_code(404);
-    exit("No image found or image is empty");
+if ($stmt->num_rows === 0) {
+    $stmt->close();
+    // 1x1 transparent PNG fallback
+    header('Content-Type: image/png');
+    echo base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADpQG5Cr8L0gAAAABJRU5ErkJggg==');
+    exit;
 }
+$stmt->bind_result($blob);
+$stmt->fetch();
 $stmt->close();
-?>
+
+if (!$blob) {
+    header('Content-Type: image/png');
+    echo base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADpQG5Cr8L0gAAAABJRU5ErkJggg==');
+    exit;
+}
+
+// Assume JPEG (you can store mime if needed)
+header('Content-Type: image/jpeg');
+header('Cache-Control: public, max-age=31536000, immutable');
+echo $blob;

@@ -34,9 +34,12 @@ function formatDeliveryType(string $t): string {
 }
 
 include '../connect.php';
+require '../includes/profile_guard.php';
+requireVerifiedProfile($conn, (int)$_SESSION['cust_id']);
 
-/* Fetch minimal customer info (driver = customer) */
 $cust_id = (int)$_SESSION['cust_id'];
+
+/* Minimal customer info (driver = customer) */
 $stmt = $conn->prepare("SELECT full_name, phone_no, email, id_no FROM customer WHERE cust_id = ?");
 $stmt->bind_param("i", $cust_id);
 $stmt->execute();
@@ -44,15 +47,26 @@ $stmt->bind_result($c_full_name, $c_phone, $c_email, $c_id_no);
 $stmt->fetch();
 $stmt->close();
 
-/* Car */
+/* Fetch car with status for availability re-check (ADDED status) */
 $car_id = (int)($booking['car_id'] ?? 0);
 $car = null;
 if ($car_id > 0) {
-    $stmt = $conn->prepare("SELECT car_brand, car_model, daily_rate FROM car WHERE car_id = ?");
+    $stmt = $conn->prepare("SELECT car_brand, car_model, daily_rate, status FROM car WHERE car_id = ?");
     $stmt->bind_param("i", $car_id);
     $stmt->execute();
     $car = $stmt->get_result()->fetch_assoc();
     $stmt->close();
+}
+if (!$car) {
+    $_SESSION['booking_error'] = "Car not found.";
+    header("Location: book_car.php");
+    exit;
+}
+/* Availability re-check (ADDED) */
+if (strcasecmp($car['status'], 'available') !== 0) {
+    $_SESSION['booking_error'] = "This car just became unavailable. Please pick another.";
+    header("Location: book_car.php?car_id=".$car_id);
+    exit;
 }
 
 $pickup_dt_str = $booking['pickup_datetime'] ?? '';
@@ -62,29 +76,68 @@ try { $pickupDT = new DateTime($pickup_dt_str); } catch(Throwable $e){ $pickupDT
 try { $returnDT = new DateTime($return_dt_str); } catch(Throwable $e){ $returnDT = null; }
 
 if (!$pickupDT || !$returnDT || $returnDT <= $pickupDT) {
+    $_SESSION['booking_error'] = "Invalid rental period.";
     header("Location: book_car.php?car_id=".$car_id);
     exit;
 }
 
-/* Days (daily rental only) */
-$days = isset($booking['booking_duration'])
-    ? (int)$booking['booking_duration']
-    : max(1, (int)$pickupDT->diff($returnDT)->days);
+/* Days (daily rental only) 
+   Prefer new key 'rental_days', then old 'booking_duration', else compute diff. (UPDATED) */
+if (isset($booking['rental_days'])) {
+    $days = (int)$booking['rental_days'];
+} elseif (isset($booking['booking_duration'])) {
+    $days = (int)$booking['booking_duration'];
+} else {
+    $days = (int)$pickupDT->diff($returnDT)->days;
+}
+if ($days < 1) {
+    $_SESSION['booking_error'] = "Rental must be at least 1 full day.";
+    header("Location: book_car.php?car_id=".$car_id);
+    exit;
+}
 
-/* Monetary (from review step, or recompute fallback) */
-$rental_subtotal   = isset($booking['rental_subtotal'])
-    ? (float)$booking['rental_subtotal']
-    : (($car ? (float)$car['daily_rate'] : 0) * $days);
+/* Recompute pricing server-side for safety (ADDED) */
+$daily_rate       = (float)$car['daily_rate'];
+$rental_subtotal  = $days * $daily_rate;
+$security_deposit = isset($booking['security_deposit']) ? (float)$booking['security_deposit'] : 100.00;
+$provisional_total = $rental_subtotal + $security_deposit;
 
-$security_deposit  = isset($booking['security_deposit']) ? (float)$booking['security_deposit'] : 100.00;
-$provisional_total = isset($booking['provisional_total']) ? (float)$booking['provisional_total'] : ($rental_subtotal + $security_deposit);
-
+/* Delivery type / locations */
 $delivery_type     = $booking['delivery_type']     ?? 'self_pickup';
 $delivery_location = trim($booking['delivery_location'] ?? '');
 $return_location   = trim($booking['return_location'] ?? '');
 
 $requires_delivery  = in_array($delivery_type, ['delivery','pickup_and_return'], true);
 $has_return_segment = ($delivery_type === 'pickup_and_return');
+
+/* Overlap race re-check (ADDED) */
+$pickup_sql = $pickupDT->format('Y-m-d H:i:s');
+$return_sql = $returnDT->format('Y-m-d H:i:s');
+$overlapSql = "
+    SELECT 1
+    FROM booking
+    WHERE car_id = ?
+      AND status IN ('pending','confirmed')
+      AND NOT (return_datetime <= ? OR pickup_datetime >= ?)
+    LIMIT 1
+";
+$ov = $conn->prepare($overlapSql);
+$ov->bind_param('iss', $car_id, $pickup_sql, $return_sql);
+$ov->execute();
+$ov->store_result();
+if ($ov->num_rows > 0) {
+    $ov->close();
+    $_SESSION['booking_error'] = "The selected dates have just been booked. Please choose different dates.";
+    header("Location: book_car.php?car_id=".$car_id);
+    exit;
+}
+$ov->close();
+
+/* OPTIONAL: Update session with authoritative values (ADDED) */
+$_SESSION['booking_data']['rental_days']       = $days;
+$_SESSION['booking_data']['rental_subtotal']   = $rental_subtotal;
+$_SESSION['booking_data']['security_deposit']  = $security_deposit;
+$_SESSION['booking_data']['provisional_total'] = $provisional_total;
 
 /* Summary line */
 $summary_line = sprintf(
@@ -96,7 +149,7 @@ $summary_line = sprintf(
     $returnDT->format('Y-m-d H:i')
 );
 
-/* Terms */
+/* Terms (unchanged) */
 $agreement_terms = <<<EOT
 AGREEMENT OF VEHICLE USAGE BETWEEN BORROWER AND TIMELESS CAR RENTAL
 
@@ -120,8 +173,14 @@ IT IS HEREBY AGREED AS FOLLOWS:
 15. BORROWER & GUARANTOR acknowledge vehicle compartments were shown empty of prohibited goods; they release TimeLess Car Rental from related claims.
 16. Security deposit (as agreed) is held against breaches, unauthorized travel, or summons; refundable (less deductions) within five (5) working days after return.
 DELIVERY FEE (If Applicable):
-A delivery / pickup service fee is NOT included in the provisional total and will be confirmed by an administrator. BORROWER agrees final payable amount may increase once set.
+A delivery / pickup service fee is NOT included in the provisional total and will be confirmed by an administrator. BORROWER agrees final payable amount may increase once set.
 EOT;
+
+/* CSRF token (ADDED) */
+if (empty($_SESSION['csrf_token'])) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
+$csrf_token = $_SESSION['csrf_token'];
 
 ?>
 <!DOCTYPE html>
@@ -134,39 +193,20 @@ EOT;
 <style>
 body { background:#eceef4; }
 .agreement-section {
-    max-width: 760px;
-    margin: 40px auto 70px;
-    background:#fff;
-    border-radius:14px;
-    box-shadow:0 4px 18px rgba(40,55,95,0.10);
+    max-width: 760px; margin: 40px auto 70px; background:#fff;
+    border-radius:14px; box-shadow:0 4px 18px rgba(40,55,95,0.10);
     padding:34px 42px 36px;
 }
-.agreement-title {
-    font-size:1.38em;
-    font-weight:700;
-    color:#2f377d;
-    margin:0 0 8px;
-    letter-spacing:.5px;
-}
+.agreement-title { font-size:1.38em; font-weight:700; color:#2f377d; margin:0 0 8px; letter-spacing:.5px; }
 .summary-line {
-    font-size:.82em;
-    color:#4d5875;
-    margin-bottom:20px;
-    background:#f2f5fa;
-    border:1px solid #e2e7f1;
-    padding:8px 12px;
-    border-radius:8px;
-    line-height:1.35em;
+    font-size:.82em; color:#4d5875; margin-bottom:20px; background:#f2f5fa;
+    border:1px solid #e2e7f1; padding:8px 12px; border-radius:8px; line-height:1.35em;
 }
-.mini-table {
-    width:100%; border-collapse:collapse;
-    margin: 0 0 18px; font-size:.9em;
-}
+.mini-table { width:100%; border-collapse:collapse; margin:0 0 18px; font-size:.9em; }
 .mini-table th, .mini-table td { padding:8px 10px; vertical-align:top; }
 .mini-table th {
-    width:200px; text-align:left; background:#f5f6fa;
-    font-weight:600; color:#3a4769; border-right:1px solid #dfe3ed;
-    font-size:.8em; letter-spacing:.4px;
+    width:200px; text-align:left; background:#f5f6fa; font-weight:600;
+    color:#3a4769; border-right:1px solid #dfe3ed; font-size:.8em; letter-spacing:.4px;
 }
 .mini-table td { background:#fafbfe; color:#2d364d; }
 .badge-pending {
@@ -176,8 +216,7 @@ body { background:#eceef4; }
 .agreement-terms {
     font-size:.86em; color:#243049; background:#f7f9fc;
     padding:16px 18px; border-radius:10px; height:300px; overflow-y:auto;
-    line-height:1.45em; border:1px solid #e3e8f3; white-space:pre-line;
-    margin-bottom:18px;
+    line-height:1.45em; border:1px solid #e3e8f3; white-space:pre-line; margin-bottom:18px;
 }
 .input-row { margin-bottom:18px; }
 input[type="checkbox"] { margin-right:8px; transform:scale(1.15); }
@@ -205,9 +244,7 @@ input[type="checkbox"] { margin-right:8px; transform:scale(1.15); }
 .back-btn:hover { background:#bfc5ce; }
 .submit-btn { background:#3c4cb8; color:#fff; }
 .submit-btn:hover { background:#234c96; }
-.pending-note {
-    font-size:.72em; color:#7a4d05; margin-top:-12px; margin-bottom:16px;
-}
+.pending-note { font-size:.72em; color:#7a4d05; margin-top:-12px; margin-bottom:16px; }
 .small-hint { font-size:.7em; color:#6c788f; margin-top:6px; }
 @media (max-width:860px){
     .agreement-section { padding:28px 26px 34px; }
@@ -236,7 +273,7 @@ input[type="checkbox"] { margin-right:8px; transform:scale(1.15); }
         <tr><th>Pickup Date & Time</th><td><?= htmlspecialchars($pickupDT->format('Y-m-d H:i')) ?></td></tr>
         <tr><th>Return Date & Time</th><td><?= htmlspecialchars($returnDT->format('Y-m-d H:i')) ?></td></tr>
         <tr><th>Duration</th><td><?= $days ?> day(s)</td></tr>
-        <tr><th>Daily Rate</th><td>RM <?= number_format($car['daily_rate'] ?? 0, 2) ?></td></tr>
+        <tr><th>Daily Rate</th><td>RM <?= number_format($daily_rate, 2) ?></td></tr>
         <tr><th>Rental Subtotal</th><td>RM <?= number_format($rental_subtotal,2) ?></td></tr>
         <tr><th>Security Deposit</th><td>RM <?= number_format($security_deposit,2) ?></td></tr>
         <?php if ($requires_delivery): ?>
@@ -251,7 +288,9 @@ input[type="checkbox"] { margin-right:8px; transform:scale(1.15); }
         <div class="pending-note">Final total will increase once the delivery/pickup service fee is confirmed by admin.</div>
     <?php endif; ?>
 
+    <!-- IMPORTANT: booking_submit.php MUST re-validate availability, overlap, and recalc totals before DB insert -->
     <form action="booking_submit.php" method="POST" onsubmit="return submitAgreementForm();" enctype="multipart/form-data">
+        <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>"><!-- CSRF token ADDED -->
         <div class="agreement-terms"><?= nl2br(htmlspecialchars($agreement_terms)) ?></div>
 
         <div class="input-row">
@@ -296,7 +335,7 @@ function resizeCanvas(){
 }
 resizeCanvas();
 window.addEventListener('resize', () => {
-    // Clear on resize (simpler). If you want to preserve, you'd need to copy image data.
+    // Clears on resize (simple). If you want to preserve, you would copy image data first.
     resizeCanvas();
 });
 
@@ -325,8 +364,7 @@ function draw(e){
     ctx.lineTo(p.x, p.y);
     ctx.stroke();
 }
-function endDraw(e){
-    if (!drawing) return;
+function endDraw(){
     drawing = false;
 }
 
@@ -341,6 +379,7 @@ canvas.addEventListener('touchend', endDraw, {passive:false});
 function clearSignaturePad(){ ctx.clearRect(0,0,canvas.width,canvas.height); }
 
 function isBlank(){
+    // Rough blank check
     const blank = document.createElement('canvas');
     blank.width = canvas.width;
     blank.height = canvas.height;

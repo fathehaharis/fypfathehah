@@ -1,16 +1,8 @@
 <?php
 /**
- * view_booking.php
- *
- * READ-ONLY PAGE.
- * Shows booking details + related car + computed financial summary + agreement download link.
- * NO edit / add / create / payment / profile / guarantor actions or buttons.
- *
- * Assumptions (based on provided DDL):
- *  - Agreement (if exists) stored in agreement_form (row per booking) with agreement_id (BLOB of PDF stored in agreement_file_path).
- *  - Customer acts as driver (no separate driver table).
- *  - Delivery / pickup & return fee stored as a service row with service_type in ('delivery','pickup_and_return').
- *  - booking.total_price maintained by triggers for delivery-related fee only.
+ * view_booking.php (Daily-only)
+ * Read-only booking detail page.
+ * Adjusted to new image schema (car_image via car_image_id + get_car_image.php) and delivery service handling.
  */
 
 session_start();
@@ -18,12 +10,15 @@ if (!isset($_SESSION['cust_id'])) {
     header("Location: /index.php");
     exit;
 }
-
 date_default_timezone_set('Asia/Kuala_Lumpur');
 require '../connect.php';
 
 if (!isset($_GET['booking_id']) || !ctype_digit($_GET['booking_id'])) {
-    echo "<p>Invalid booking ID.</p>";
+    include '../includes/header.php';
+    echo "<div style='max-width:640px;margin:60px auto;font-family:sans-serif;'>
+            <p>Invalid booking ID.</p>
+            <a href='bookings.php' style='color:#2f4d85;font-weight:600;text-decoration:none;'>&larr; Back to Bookings</a>
+          </div>";
     include '../includes/footer.php';
     exit;
 }
@@ -31,35 +26,59 @@ if (!isset($_GET['booking_id']) || !ctype_digit($_GET['booking_id'])) {
 $booking_id = (int)$_GET['booking_id'];
 $cust_id    = (int)$_SESSION['cust_id'];
 
-/* -------- Fetch Booking + Car -------- */
-$stmt = $conn->prepare("
-    SELECT
-        b.booking_id,
-        b.cust_id,
-        b.car_id,
-        b.pickup_datetime,
-        b.return_datetime,
-        b.day_count,
-        b.daily_rate,
-        b.total_price,
-        b.security_deposit,
-        b.status,
-        b.created_at,
-        b.rejection_reason,
-        c.car_brand,
-        c.car_model,
-        c.daily_rate AS car_daily_rate,
-        c.year,
-        c.color,
-        c.mileage,
-        c.plate_no,
-        c.transmission,
-        c.seat_capacity
-    FROM booking b
-    JOIN car c ON b.car_id = c.car_id
-    WHERE b.booking_id = ? AND b.cust_id = ?
-    LIMIT 1
-");
+/* -------- Fetch Booking + Car + Representative Image + Service + Agreement (UPDATED QUERY) -------- */
+$sql = "
+SELECT
+    b.booking_id,
+    b.cust_id,
+    b.car_id,
+    b.pickup_datetime,
+    b.return_datetime,
+    b.day_count,
+    b.daily_rate,
+    b.total_price,
+    b.security_deposit,
+    b.status,
+    b.created_at,
+    b.rejection_reason,
+    c.car_brand,
+    c.car_model,
+    c.daily_rate AS car_daily_rate,
+    c.year,
+    c.color,
+    c.mileage,
+    c.plate_no,
+    c.transmission,
+    c.seat_capacity,
+    COALESCE(main_img.main_image_id, any_img.any_image_id) AS car_image_id,
+    svc.service_type,
+    svc.fee AS service_fee,
+    svc.status AS service_status,
+    svc.delivery_location,
+    svc.return_location,
+    ag.agreement_id
+FROM booking b
+JOIN car c ON b.car_id = c.car_id
+LEFT JOIN (
+    SELECT car_id, MIN(car_image_id) AS main_image_id
+    FROM car_image
+    WHERE image_type='main'
+    GROUP BY car_id
+) main_img ON c.car_id = main_img.car_id
+LEFT JOIN (
+    SELECT car_id, MIN(car_image_id) AS any_image_id
+    FROM car_image
+    GROUP BY car_id
+) any_img ON c.car_id = any_img.car_id
+LEFT JOIN service svc
+  ON svc.booking_id = b.booking_id
+ AND svc.service_type IN ('delivery','pickup_and_return')
+LEFT JOIN agreement_form ag
+  ON ag.booking_id = b.booking_id
+WHERE b.booking_id = ? AND b.cust_id = ?
+LIMIT 1
+";
+$stmt = $conn->prepare($sql);
 $stmt->bind_param("ii", $booking_id, $cust_id);
 $stmt->execute();
 $res = $stmt->get_result();
@@ -67,21 +86,16 @@ $booking = $res->fetch_assoc();
 $stmt->close();
 
 if (!$booking) {
-    echo "<p>Booking not found or access denied.</p>";
+    include '../includes/header.php';
+    echo "<div style='max-width:640px;margin:60px auto;font-family:sans-serif;'>
+            <p>Booking not found or access denied.</p>
+            <a href='bookings.php' style='color:#2f4d85;font-weight:600;text-decoration:none;'>&larr; Back to Bookings</a>
+          </div>";
     include '../includes/footer.php';
     exit;
 }
 
-/* -------- Car Image -------- */
-$car_image = null;
-$stmt = $conn->prepare("SELECT image_path FROM car_image WHERE car_id = ? ORDER BY car_image_id ASC LIMIT 1");
-$stmt->bind_param("i", $booking['car_id']);
-$stmt->execute();
-$stmt->bind_result($car_image);
-$stmt->fetch();
-$stmt->close();
-
-/* -------- Customer (driver equivalent) -------- */
+/* -------- Customer (driver) -------- */
 $stmt = $conn->prepare("
     SELECT full_name, phone_no, email, id_no, address, age
     FROM customer
@@ -93,7 +107,7 @@ $stmt->execute();
 $customer = $stmt->get_result()->fetch_assoc();
 $stmt->close();
 
-/* -------- Guarantor (latest) -------- */
+/* -------- Guarantor (latest for this customer) -------- */
 $stmt = $conn->prepare("
     SELECT guarantor_id, full_name, phone_no, id_no, relationship
     FROM guarantor
@@ -106,52 +120,32 @@ $stmt->execute();
 $guarantor = $stmt->get_result()->fetch_assoc();
 $stmt->close();
 
-/* -------- Agreement (already generated or not) -------- */
-$stmt = $conn->prepare("SELECT agreement_id FROM agreement_form WHERE booking_id = ? LIMIT 1");
-$stmt->bind_param("i", $booking_id);
-$stmt->execute();
-$stmt->bind_result($agreement_id);
-$stmt->fetch();
-$stmt->close();
-$agreement_download_link = $agreement_id ? "download_agreement.php?id=" . urlencode($agreement_id) : "";
+/* -------- Agreement link -------- */
+$agreement_id = $booking['agreement_id'] ?? null;
+$agreement_download_link = $agreement_id ? "download_agreement.php?id=" . urlencode((string)$agreement_id) : "";
 
-/* -------- Services (delivery only considered for total) -------- */
-$stmt = $conn->prepare("SELECT service_type, fee FROM service WHERE booking_id = ?");
-$stmt->bind_param("i", $booking_id);
-$stmt->execute();
-$services = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
-$stmt->close();
+/* -------- Delivery / Service (already joined) -------- */
+$has_service        = in_array($booking['service_type'] ?? '', ['delivery','pickup_and_return'], true);
+$service_fee        = $booking['service_fee'];
+$service_fee_pending= $has_service && is_null($service_fee);
+$delivery_type_display = $has_service
+    ? ($booking['service_type'] === 'pickup_and_return' ? 'Pickup & Return' : 'Delivery')
+    : 'Self Pickup';
+$delivery_fee_display = '-';
+$expected_delivery_part = 0.0;
 
-/* Identify delivery row */
-$delivery_row = null;
-foreach ($services as $s) {
-    if (in_array($s['service_type'], ['delivery','pickup_and_return'], true)) {
-        $delivery_row = $s;
-        break;
-    }
-}
-
-$delivery_type_display = 'Self Pickup';
-$delivery_fee_display  = '-';
-$delivery_fee_value    = 0.00;
-$delivery_pending      = false;
-
-if ($delivery_row) {
-    $raw_type = $delivery_row['service_type'];
-    $fee_val  = ($delivery_row['fee'] === null) ? null : (float)$delivery_row['fee'];
-    $delivery_type_display = ($raw_type === 'pickup_and_return') ? 'Pickup & Return' : 'Delivery';
-    if ($fee_val === null) {
+if ($has_service) {
+    if ($service_fee_pending) {
         $delivery_fee_display = '<span class="fee-pending">Pending</span>';
-        $delivery_pending = true;
-    } elseif ($fee_val == 0.0) {
+    } elseif ((float)$service_fee === 0.0) {
         $delivery_fee_display = '<span class="fee-free">Free</span>';
     } else {
-        $delivery_fee_display = 'RM ' . number_format($fee_val, 2);
-        $delivery_fee_value   = $fee_val;
+        $delivery_fee_display = 'RM '.number_format((float)$service_fee,2);
+        $expected_delivery_part = (float)$service_fee;
     }
 }
 
-/* -------- Base Rental (Daily Only) -------- */
+/* -------- Daily Rental Computation -------- */
 $daily_rate = (float)($booking['daily_rate'] ?? $booking['car_daily_rate'] ?? 0);
 $day_count  = (int)$booking['day_count'];
 if ($day_count <= 0) {
@@ -164,16 +158,11 @@ if ($day_count <= 0) {
         $day_count = 1;
     }
 }
-$base_rental = $daily_rate * $day_count;
-
-/* -------- Totals (expected vs stored) -------- */
-$security_deposit       = (float)$booking['security_deposit'];
-$stored_total           = (float)$booking['total_price'];
-$expected_delivery_part = $delivery_row
-    ? (($delivery_row['fee'] === null) ? 0.0 : (float)$delivery_row['fee'])
-    : 0.0;
-$expected_total = $base_rental + $security_deposit + $expected_delivery_part;
-$totals_match   = abs($stored_total - $expected_total) < 0.01;
+$base_rental       = $daily_rate * $day_count;
+$security_deposit  = (float)$booking['security_deposit'];
+$stored_total      = (float)$booking['total_price'];
+$expected_total    = $base_rental + $security_deposit + $expected_delivery_part;
+$totals_match      = abs($stored_total - $expected_total) < 0.01;
 
 /* -------- Status styling -------- */
 $status = strtolower($booking['status']);
@@ -182,8 +171,7 @@ $status_class = match($status) {
     'approved'  => 'status-approved',
     'confirmed' => 'status-confirmed',
     'completed' => 'status-completed',
-    'cancelled' => 'status-cancelled',
-    'rejected'  => 'status-cancelled',
+    'cancelled', 'rejected' => 'status-cancelled',
     default     => 'status-upcoming'
 };
 
@@ -201,10 +189,9 @@ body { background:#eceef4; }
 .status-label { padding:6px 16px; border-radius:24px; font-weight:600; font-size:.75em; letter-spacing:.5px; display:inline-block; }
 .status-pending { background:#fff4cf; color:#9f7800; }
 .status-approved { background:#e8f1fd; color:#2c4f94; }
-.status-confirmed { background:#e3edff; color:#28438f; }
+.status-confirmed, .status-upcoming { background:#e3edff; color:#28438f; }
 .status-completed { background:#dff9e4; color:#1b7c3b; }
 .status-cancelled { background:#ffe0e0; color:#c33b3b; }
-.status-upcoming { background:#e3edff; color:#28438f; }
 .fee-pending { background:#fff2d9; color:#b36a08; padding:4px 10px; border-radius:10px; font-weight:600; font-size:.70em; }
 .fee-free { background:#e3fbe6; color:#1d7a43; padding:5px 14px; border-radius:25px; font-weight:700; font-size:.65em; letter-spacing:.4px; }
 .mismatch-flag { color:#b85600; font-weight:600; font-size:.72em; margin-left:8px; }
@@ -239,8 +226,11 @@ body { background:#eceef4; }
         <tr>
             <th>Car</th>
             <td>
-                <?php if (!empty($car_image)): ?>
-                    <img class="car-thumb" src="data:image/jpeg;base64,<?= base64_encode($car_image) ?>" alt="Car">
+                <?php if (!empty($booking['car_image_id'])): ?>
+                    <img class="car-thumb"
+                         src="get_car_image.php?car_image_id=<?= (int)$booking['car_image_id'] ?>"
+                         alt="Car Image"
+                         onerror="this.src='/assets/images/no-car.png'">
                 <?php else: ?>
                     <img class="car-thumb" src="/assets/images/no-car.png" alt="No Car Image">
                 <?php endif; ?>
@@ -267,14 +257,17 @@ body { background:#eceef4; }
 
     <div class="section-label">Delivery / Service</div>
     <table class="data-table">
-        <tr>
-            <th>Delivery Type</th>
-            <td><?= htmlspecialchars($delivery_type_display) ?></td>
-        </tr>
-        <tr>
-            <th>Delivery Fee</th>
-            <td><?= $delivery_fee_display ?></td>
-        </tr>
+        <tr><th>Delivery Type</th><td><?= htmlspecialchars($delivery_type_display) ?></td></tr>
+        <tr><th>Delivery Fee</th><td><?= $delivery_fee_display ?></td></tr>
+        <?php if ($has_service): ?>
+            <?php if (!empty($booking['delivery_location'])): ?>
+                <tr><th>Delivery Location / Notes</th><td><?= nl2br(htmlspecialchars($booking['delivery_location'])) ?></td></tr>
+            <?php endif; ?>
+            <?php if (!empty($booking['return_location'])): ?>
+                <tr><th>Return Pickup Location / Notes</th><td><?= nl2br(htmlspecialchars($booking['return_location'])) ?></td></tr>
+            <?php endif; ?>
+            <tr><th>Service Status</th><td><?= htmlspecialchars($booking['service_status'] ?? '-') ?></td></tr>
+        <?php endif; ?>
     </table>
 
     <div class="section-label">Financial Summary</div>
@@ -283,7 +276,7 @@ body { background:#eceef4; }
         <tr><th>Security Deposit</th><td>RM <?= number_format($security_deposit,2) ?></td></tr>
         <tr><th>Delivery Fee (expected)</th><td>RM <?= number_format($expected_delivery_part,2) ?></td></tr>
         <tr>
-            <th>Expected Total (Base + Deposit + Delivery)</th>
+            <th>Expected Total</th>
             <td>
                 RM <?= number_format($expected_total,2) ?>
                 <?php if ($totals_match): ?>
@@ -296,8 +289,7 @@ body { background:#eceef4; }
         <tr><th>Stored Total (DB)</th><td>RM <?= number_format($stored_total,2) ?></td></tr>
     </table>
     <div class="inline-note">
-        Stored total maintained by database triggers when delivery / pickup & return fee changes.
-        Pending delivery fee counted as 0.00 until set.
+        Stored total reflects delivery fee once applied. While delivery fee is pending, expected total excludes that fee.
     </div>
 
     <div class="section-label">Customer (Driver)</div>
@@ -320,7 +312,7 @@ body { background:#eceef4; }
         </table>
     <?php else: ?>
         <div class="warning-box">
-            No guarantor record found for this booking's customer.
+            No guarantor record found for this customer.
         </div>
     <?php endif; ?>
 

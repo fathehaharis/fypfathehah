@@ -5,13 +5,13 @@ ini_set('display_errors', 1);
 ini_set('display_startup_errors', 1);
 error_reporting(E_ALL);
 
-if (!isset($_SESSION['cust_id'])) {
+if (empty($_SESSION['cust_id'])) {
     header("Location: /index.php");
     exit;
 }
 
-include '../connect.php';
-include '../includes/header.php';
+require '../connect.php';
+require '../includes/header.php';
 
 $cust_id = (int)$_SESSION['cust_id'];
 
@@ -41,7 +41,7 @@ $stmt->close();
 
 $customer_name = $profile['username'] ?? 'Customer';
 
-/* Profile completeness logic */
+/* Profile completeness */
 $requiredFields = [
     'full_name' => 'Full Name',
     'email' => 'Email',
@@ -59,7 +59,7 @@ $requiredImages = [
 
 $missing = [];
 foreach ($requiredFields as $k => $label) {
-    if (empty(trim((string)($profile[$k] ?? '')))) {
+    if (!isset($profile[$k]) || trim((string)$profile[$k]) === '') {
         $missing[] = $label;
     }
 }
@@ -71,32 +71,41 @@ foreach ($requiredImages as $k => $label) {
 
 $totalRequired     = count($requiredFields) + count($requiredImages);
 $completed         = $totalRequired - count($missing);
-$completionPercent = $totalRequired > 0 ? round(($completed / $totalRequired) * 100) : 100;
+$completionPercent = $totalRequired > 0 ? (int)round(($completed / $totalRequired) * 100) : 100;
 $showProfileNotice = $completionPercent < 100;
 
-/* Cars */
-$sql = "
-    SELECT c.car_id, c.car_brand, c.car_model, c.daily_rate,
-           COALESCE(main_img.car_image_id, any_img.car_image_id) AS car_image_id
+/*
+  Cars (only available). 
+  We select a representative image_id with priority:
+   1. image_type='main'
+   2. lowest sort_order
+   3. lowest car_image_id
+*/
+$carSql = "
+    SELECT
+        c.car_id,
+        c.car_brand,
+        c.car_model,
+        c.daily_rate,
+        c.images_version,
+        (
+            SELECT ci.car_image_id
+            FROM car_image ci
+            WHERE ci.car_id = c.car_id
+            ORDER BY (ci.image_type = 'main') DESC,
+                     ci.sort_order ASC,
+                     ci.car_image_id ASC
+            LIMIT 1
+        ) AS car_image_id
     FROM car c
-    LEFT JOIN (
-        SELECT car_id, MIN(car_image_id) AS car_image_id
-        FROM car_image
-        WHERE image_type = 'main'
-        GROUP BY car_id
-    ) main_img ON c.car_id = main_img.car_id
-    LEFT JOIN (
-        SELECT car_id, MIN(car_image_id) AS car_image_id
-        FROM car_image
-        GROUP BY car_id
-    ) any_img ON c.car_id = any_img.car_id
     WHERE c.status = 'available'
-    ORDER BY c.car_brand, c.car_model
+    ORDER BY c.car_brand, c.car_model, c.car_id
 ";
-$result = $conn->query($sql);
+$carResult = $conn->query($carSql);
 ?>
 <link rel="stylesheet" href="/assets/css/style.css">
 <style>
+/* (Retain your CSS – only minimal changes added for accessibility) */
 .welcome-banner {
     max-width: 1200px;
     margin: 35px auto -10px auto;
@@ -131,7 +140,6 @@ $result = $conn->query($sql);
     60% { transform: rotate(0deg);}
     100% { transform: rotate(0deg);}
 }
-
 /* Profile notice */
 .profile-notice-wrapper {
     max-width: 1200px;
@@ -168,7 +176,6 @@ $result = $conn->query($sql);
 .profile-progress-bar {
     height: 100%;
     background: linear-gradient(90deg, #ffce4f, #ffb347);
-    /* width set inline to avoid CSS parse error in editor */
     transition: width .4s;
 }
 .profile-missing-list {
@@ -271,6 +278,11 @@ $result = $conn->query($sql);
     display: inline-block;
 }
 .book-btn:hover { background: #234c96; }
+.book-btn.disabled {
+    background: #9aa9c9;
+    cursor: not-allowed;
+    pointer-events: none;
+}
 .no-cars {
     text-align: center;
     margin-top: 80px;
@@ -345,7 +357,8 @@ $result = $conn->query($sql);
         <p style="margin:2px 0 8px;">
             Please complete your profile before making a booking to ensure fast verification & accurate agreement generation.
         </p>
-        <div class="profile-progress" aria-label="Profile completion progress">
+        <div class="profile-progress" aria-label="Profile completion progress" role="progressbar"
+             aria-valuemin="0" aria-valuemax="100" aria-valuenow="<?= $completionPercent ?>">
             <div class="profile-progress-bar" style="width: <?= $completionPercent ?>%;"></div>
         </div>
         <p style="margin:0 0 6px;font-weight:600;">Missing:</p>
@@ -380,28 +393,32 @@ function dismissProfileNotice() {
       <span class="pickup-note">
         You may collect your booked car directly from our rental location above.
         <a href="https://maps.google.com/?q=DT+1564,+JALAN+BUKIT+TAMBUN+PERDANA+21,+TAMAN+BUKIT+TAMBUN+PERDANA,+76100+DURIAN+TUNGGAL,+MELAKA"
-           target="_blank" class="pickup-map-link">View on Google Maps</a>
+           target="_blank" class="pickup-map-link" rel="noopener">View on Google Maps</a>
       </span>
     </span>
 </div>
 
 <div class="cars-container">
-<?php if ($result && $result->num_rows > 0): ?>
-    <?php while ($car = $result->fetch_assoc()): ?>
+<?php if ($carResult && $carResult->num_rows > 0): ?>
+    <?php while ($car = $carResult->fetch_assoc()): 
+        $imgSrc = $car['car_image_id']
+            ? "get_car_image.php?car_image_id=".(int)$car['car_image_id']."&v=".(int)$car['images_version']
+            : "/assets/images/viva_elite.png";
+        $alt = $car['car_brand'].' '.$car['car_model'];
+        $canBook = $completionPercent === 100; // Gate booking optionally
+    ?>
         <div class="car-card">
-            <?php if (!empty($car['car_image_id'])): ?>
-                <img class="car-img"
-                     src="get_car_image.php?car_image_id=<?= (int)$car['car_image_id'] ?>"
-                     alt="Car image"
-                     onerror="this.src='/assets/images/viva_elite.png'">
-            <?php else: ?>
-                <img class="car-img"
-                     src="/assets/images/viva_elite.png"
-                     alt="No car image">
-            <?php endif; ?>
-            <div class="car-title"><?= htmlspecialchars($car['car_brand'] . ' ' . $car['car_model']) ?></div>
-            <div class="car-rate">RM <?= number_format($car['daily_rate'], 2) ?> / day</div>
-            <a class="book-btn" href="book_car.php?car_id=<?= (int)$car['car_id'] ?>">Book Now</a>
+            <img class="car-img"
+                 src="<?= htmlspecialchars($imgSrc) ?>"
+                 alt="<?= htmlspecialchars($alt) ?>"
+                 onerror="this.src='/assets/images/viva_elite.png'">
+            <div class="car-title"><?= htmlspecialchars($alt) ?></div>
+            <div class="car-rate">RM <?= number_format((float)$car['daily_rate'], 2) ?> / day</div>
+            <a class="book-btn<?= $canBook ? '' : ' disabled' ?>"
+               href="<?= $canBook ? 'book_car.php?car_id='.(int)$car['car_id'] : '#' ?>"
+               <?= $canBook ? '' : 'aria-disabled="true"' ?>>
+               <?= $canBook ? 'Book Now' : 'Complete Profile First' ?>
+            </a>
         </div>
     <?php endwhile; ?>
 <?php else: ?>
@@ -409,4 +426,4 @@ function dismissProfileNotice() {
 <?php endif; ?>
 </div>
 
-<?php include '../includes/footer.php'; ?>
+<?php require '../includes/footer.php'; ?>

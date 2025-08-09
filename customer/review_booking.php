@@ -20,8 +20,9 @@ include '../connect.php';
 require '../includes/profile_guard.php';
 requireVerifiedProfile($conn, (int)$_SESSION['cust_id']);
 
-/* Fetch customer (driver) */
 $cust_id = (int)$_SESSION['cust_id'];
+
+/* Fetch customer (driver) */
 $stmt = $conn->prepare("
     SELECT full_name, phone_no, id_no, address, age,
            id_front_image, id_back_image,
@@ -32,25 +33,33 @@ $stmt = $conn->prepare("
 ");
 $stmt->bind_param("i", $cust_id);
 $stmt->execute();
-$stmt->bind_result($c_full_name,$c_phone_no,$c_id_no,$c_address,$c_age,
-                   $c_id_front_image,$c_id_back_image,
-                   $c_license_front_image,$c_license_back_image,$c_email);
+$stmt->bind_result(
+    $c_full_name,$c_phone_no,$c_id_no,$c_address,$c_age,
+    $c_id_front_image,$c_id_back_image,
+    $c_license_front_image,$c_license_back_image,$c_email
+);
 $stmt->fetch();
 $stmt->close();
 
-/* Car */
+/* Car (fetch daily_rate + status for availability check) */
 $car_id = (int)($booking['car_id'] ?? 0);
 if ($car_id <= 0) {
     header("Location: book_car.php");
     exit;
 }
-$stmt = $conn->prepare("SELECT car_brand, car_model, daily_rate, hourly_rate FROM car WHERE car_id = ?");
+$stmt = $conn->prepare("SELECT car_brand, car_model, daily_rate, status FROM car WHERE car_id = ?");
 $stmt->bind_param("i", $car_id);
 $stmt->execute();
 $car = $stmt->get_result()->fetch_assoc();
 $stmt->close();
 if (!$car) {
     header("Location: book_car.php");
+    exit;
+}
+/* Availability re-check */
+if (strcasecmp($car['status'], 'available') !== 0) {
+    $_SESSION['booking_error'] = "The selected car has become unavailable. Please choose another vehicle.";
+    header("Location: book_car.php?car_id=".$car_id);
     exit;
 }
 
@@ -60,42 +69,64 @@ $return_raw = $booking['return_datetime'] ?? '';
 try { $pickupDT = new DateTime($pickup_raw); } catch (Throwable $e) { $pickupDT = false; }
 try { $returnDT = new DateTime($return_raw); } catch (Throwable $e) { $returnDT = false; }
 
-if (!$pickupDT || !$returnDT || $returnDT <= $pickupDT) {
-    $_SESSION['date_error'] = "Invalid pickup/return times.";
+if (!$pickupDT || !$returnDT) {
+    $_SESSION['date_error'] = "Invalid pickup/return timestamps.";
     header("Location: book_car.php?car_id=".$car_id);
     exit;
 }
 
-/* Pricing (mixed daily/hourly) */
-$interval    = $pickupDT->diff($returnDT);
-$total_hours = ($interval->days * 24) + $interval->h + ($interval->i > 0 ? 1 : 0);
-if ($total_hours <= 0) $total_hours = 1;
+/* Ensure return strictly after pickup, full-day rental */
+$intervalDays = $pickupDT->diff($returnDT)->days;
+if ($returnDT <= $pickupDT || $intervalDays < 1) {
+    $_SESSION['date_error'] = "Daily rental must be at least 1 full day.";
+    header("Location: book_car.php?car_id=".$car_id);
+    exit;
+}
 
-$full_days      = intdiv($total_hours, 24);
-$leftover_hours = $total_hours % 24;
+/* Overlap re-check (race condition protection) */
+$overlapSql = "
+    SELECT 1
+    FROM booking
+    WHERE car_id = ?
+      AND status IN ('pending','confirmed')
+      AND NOT (return_datetime <= ? OR pickup_datetime >= ?)
+    LIMIT 1
+";
+$overlapStmt = $conn->prepare($overlapSql);
+$pickup_sql  = $pickupDT->format('Y-m-d H:i:s');
+$return_sql  = $returnDT->format('Y-m-d H:i:s');
+$overlapStmt->bind_param('iss', $car_id, $pickup_sql, $return_sql);
+$overlapStmt->execute();
+$overlapStmt->store_result();
+if ($overlapStmt->num_rows > 0) {
+    $overlapStmt->close();
+    $_SESSION['booking_error'] = "The selected period has just been taken. Please choose new dates.";
+    header("Location: book_car.php?car_id=".$car_id);
+    exit;
+}
+$overlapStmt->close();
 
-$daily_rate  = (float)$car['daily_rate'];
-$hourly_rate = (float)$car['hourly_rate'];
+/* Daily-only pricing */
+$rental_days       = $intervalDays; // full days
+$daily_rate        = (float)$car['daily_rate'];
+$rental_subtotal   = $rental_days * $daily_rate;
+$security_deposit  = 100.00;
 
-$subtotal = ($full_days * $daily_rate) + ($leftover_hours * $hourly_rate);
-$security_deposit = 100.00;
-
-/* Delivery logic (pending fee) */
+/* Delivery logic */
 $delivery_type      = $booking['delivery_type']      ?? 'self_pickup';
 $delivery_location  = trim($booking['delivery_location'] ?? '');
 $return_location    = trim($booking['return_location'] ?? '');
 $requires_delivery  = in_array($delivery_type, ['delivery','pickup_and_return'], true);
 $has_return_segment = ($delivery_type === 'pickup_and_return');
 
-/* Provisional total (exclude delivery fee) */
-$provisional_total = $subtotal + $security_deposit;
+/* Provisional total (delivery fee pending) */
+$provisional_total = $rental_subtotal + $security_deposit;
 
-/* Persist computed values back to session (optional) */
-$_SESSION['booking_data']['booking_duration']       = $full_days;
-$_SESSION['booking_data']['booking_leftover_hours'] = $leftover_hours;
-$_SESSION['booking_data']['security_deposit']       = $security_deposit;
-$_SESSION['booking_data']['rental_subtotal']        = $subtotal;
-$_SESSION['booking_data']['provisional_total']      = $provisional_total;
+/* Persist back to session */
+$_SESSION['booking_data']['rental_days']       = $rental_days;
+$_SESSION['booking_data']['security_deposit']  = $security_deposit;
+$_SESSION['booking_data']['rental_subtotal']   = $rental_subtotal;
+$_SESSION['booking_data']['provisional_total'] = $provisional_total;
 
 function formatDeliveryType($t){ return ucwords(str_replace('_',' ', $t)); }
 
@@ -123,12 +154,8 @@ body { background:#eceef4; }
 .review-table tr:nth-child(even) td { background:#fafbfe; }
 .total-row th, .total-row td { border-top:2px solid #c9d2e8; background:#f1f4fb; }
 .total { font-size:1.12em; font-weight:700; color:#1f2f80; }
-.badge-mix {
-    display:inline-block; background:#3c4cb8; color:#fff; font-size:.65em;
-    padding:3px 8px; border-radius:12px; letter-spacing:.5px; margin-left:6px;
-}
 .pending-fee { color:#b05a00; font-style:italic; }
-.info-note { font-size:.78em; color:#68718a; margin-top:4px; }
+.note-line { font-size:.75em; color:#666; }
 .img-preview-big {
     max-width:150px; max-height:110px; border:1px solid #cdd2dd;
     border-radius:8px; background:#f7f9fd; object-fit:cover; display:block; margin:4px 0;
@@ -154,7 +181,6 @@ body { background:#eceef4; }
 .edit-btn:hover { background:#3c4cb8; color:#fff; }
 .next-btn { background:#3c4cb8; color:#fff; }
 .next-btn:hover { background:#234c96; }
-.note-line { font-size:.75em; color:#666; }
 @media (max-width:880px) {
     .review-section { padding:26px 24px 30px; }
     .review-table th { width:40%; }
@@ -167,28 +193,9 @@ body { background:#eceef4; }
     <div class="section-label">Car & Booking Details</div>
     <table class="review-table">
         <tr><th>Car Selected</th><td><?= htmlspecialchars($car['car_brand'].' '.$car['car_model']) ?></td></tr>
-        <tr>
-            <th>Rental Pricing Mode</th>
-            <td>
-                <?php
-                if ($full_days > 0 && $leftover_hours > 0) {
-                    echo "Mixed (Daily + Hourly) <span class='badge-mix'>MIXED</span>";
-                } elseif ($full_days > 0) {
-                    echo "Daily";
-                } else {
-                    echo "Hourly";
-                }
-                ?>
-            </td>
-        </tr>
-        <?php if ($full_days > 0): ?>
-            <tr><th>Daily Rate</th><td>RM <?= number_format($daily_rate,2) ?></td></tr>
-            <tr><th>Number of Days</th><td><?= $full_days ?> day(s)</td></tr>
-        <?php endif; ?>
-        <?php if ($leftover_hours > 0): ?>
-            <tr><th>Hourly Rate</th><td>RM <?= number_format($hourly_rate,2) ?></td></tr>
-            <tr><th>Extra Hours</th><td><?= $leftover_hours ?> hour(s)</td></tr>
-        <?php endif; ?>
+        <tr><th>Pricing Mode</th><td>Daily Only</td></tr>
+        <tr><th>Daily Rate</th><td>RM <?= number_format($daily_rate,2) ?></td></tr>
+        <tr><th>Number of Days</th><td><?= (int)$rental_days ?> day(s)</td></tr>
         <tr><th>Pickup Date & Time</th><td><?= htmlspecialchars($pickupDT->format('Y-m-d H:i:s')) ?></td></tr>
         <tr><th>Return Date & Time</th><td><?= htmlspecialchars($returnDT->format('Y-m-d H:i:s')) ?></td></tr>
         <tr><th>Delivery Type</th><td><?= htmlspecialchars(formatDeliveryType($delivery_type)) ?></td></tr>
@@ -201,7 +208,7 @@ body { background:#eceef4; }
             <tr><th>Return Pickup Location / Notes</th><td><?= nl2br(htmlspecialchars($return_location)) ?></td></tr>
         <?php endif; ?>
 
-        <tr><th>Rental Subtotal</th><td>RM <?= number_format($subtotal,2) ?></td></tr>
+        <tr><th>Rental Subtotal</th><td>RM <?= number_format($rental_subtotal,2) ?></td></tr>
 
         <?php if ($requires_delivery): ?>
             <tr>
@@ -219,9 +226,9 @@ body { background:#eceef4; }
         </tr>
         <?php if ($requires_delivery): ?>
             <tr>
-              <td colspan="2" class="note-line">
-                  Final total will increase once the delivery fee is confirmed.
-              </td>
+                <td colspan="2" class="note-line">
+                    Final total will increase once the delivery fee is confirmed.
+                </td>
             </tr>
         <?php endif; ?>
     </table>

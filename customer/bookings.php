@@ -1,15 +1,51 @@
 <?php
+declare(strict_types=1);
 session_start();
+
 if (!isset($_SESSION['cust_id'])) {
     header("Location: /index.php");
     exit;
 }
 
 date_default_timezone_set('Asia/Kuala_Lumpur');
-include '../connect.php';
+require '../connect.php';
 
 $cust_id = (int)$_SESSION['cust_id'];
 
+/* -------------------------------------------------
+   CSRF token (required by cancel_booking.php)
+------------------------------------------------- */
+if (empty($_SESSION['csrf_token'])) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
+$csrf_token = $_SESSION['csrf_token'];
+
+/* -------------------------------------------------
+   (Optional) Refund Policy constants for display
+------------------------------------------------- */
+const REFUND_POLICY_STEPS = [
+    168 => 1.00, // >= 7 days
+    72  => 0.50, // >= 3 days
+    24  => 0.25, // >= 24 hours
+    0   => 0.00  // < 24 hours
+];
+
+function buildRefundPolicyLines(): array {
+    $lines = [];
+    foreach (REFUND_POLICY_STEPS as $hrs => $rate) {
+        if ($hrs >= 24) {
+            $label = ($hrs / 24) . " day(s)";
+        } else {
+            $label = $hrs . " hour(s)";
+        }
+        $lines[] = "≥ {$label} before pickup: " . number_format($rate * 100, 0) . "% refund (excluding deposit)";
+    }
+    return $lines;
+}
+
+/* -------------------------------------------------
+   Status mapping to UI sections
+------------------------------------------------- */
 $status_map = [
     'pending'              => 'Pending',
     'waiting_verification' => 'Pending',
@@ -27,6 +63,11 @@ $bookings = [
     'Cancelled' => []
 ];
 
+/*
+  Representative car image:
+    - Prefer main image (image_type='main')
+    - Else earliest uploaded image
+*/
 $stmt = $conn->prepare("
     SELECT 
         b.booking_id,
@@ -42,19 +83,23 @@ $stmt = $conn->prepare("
         c.car_brand,
         c.car_model,
         c.plate_no,
-        ci.image_path AS car_image,
+        COALESCE(main_img.main_image_id, any_img.any_image_id) AS car_image_id,
         ds.delivery_service_type,
         ds.delivery_service_status,
         ds.delivery_service_fee
     FROM booking b
     JOIN car c ON b.car_id = c.car_id
     LEFT JOIN (
-        SELECT car_id, image_path
+        SELECT car_id, MIN(car_image_id) AS main_image_id
         FROM car_image
-        WHERE car_image_id IN (
-            SELECT MIN(car_image_id) FROM car_image GROUP BY car_id
-        )
-    ) ci ON c.car_id = ci.car_id
+        WHERE image_type='main'
+        GROUP BY car_id
+    ) main_img ON c.car_id = main_img.car_id
+    LEFT JOIN (
+        SELECT car_id, MIN(car_image_id) AS any_image_id
+        FROM car_image
+        GROUP BY car_id
+    ) any_img ON c.car_id = any_img.car_id
     LEFT JOIN (
         SELECT 
             booking_id,
@@ -78,7 +123,9 @@ while ($row = $result->fetch_assoc()) {
 }
 $stmt->close();
 
-/* Helpers */
+/* -------------------------------------------------
+   Helpers
+------------------------------------------------- */
 function computeDayCount(array $b): int {
     if (!empty($b['day_count']) && (int)$b['day_count'] > 0) return (int)$b['day_count'];
     try {
@@ -91,14 +138,33 @@ function computeDayCount(array $b): int {
 }
 
 function canCancel(array $b): bool {
-    $now = new DateTime('now', new DateTimeZone('Asia/Kuala_Lumpur'));
-    try { $pickup = new DateTime($b['pickup_datetime'], new DateTimeZone('Asia/Kuala_Lumpur')); }
-    catch (Throwable $e) { return false; }
+    // Align with server logic: cannot cancel <24h if confirmed; other statuses require future pickup.
+    $status = strtolower($b['status']);
+    if (!in_array($status, ['pending','approved','waiting_verification','confirmed'], true)) {
+        return false;
+    }
+    try {
+        $now = new DateTime('now', new DateTimeZone('Asia/Kuala_Lumpur'));
+        $pickup = new DateTime($b['pickup_datetime'], new DateTimeZone('Asia/Kuala_Lumpur'));
+    } catch (Throwable $e) {
+        return false;
+    }
     if ($pickup <= $now) return false;
     $interval = $now->diff($pickup);
     $hours_to_pickup = ($interval->days * 24) + $interval->h + ($interval->i / 60);
-    return $hours_to_pickup > 24;
+
+    if ($status === 'confirmed' && $hours_to_pickup <= 24) {
+        return false;
+    }
+    return true;
 }
+
+/* -------------------------------------------------
+   Flash messages
+------------------------------------------------- */
+$flash_success = $_SESSION['cancel_success'] ?? '';
+$flash_error   = $_SESSION['cancel_error'] ?? '';
+unset($_SESSION['cancel_success'], $_SESSION['cancel_error']);
 
 include '../includes/header.php';
 ?>
@@ -129,25 +195,15 @@ include '../includes/header.php';
 .delivery-fee-free { font-size:.70em; font-weight:700; color:#1d7a43; background:#e3fbe6; padding:4px 10px; border-radius:20px; display:inline-block; letter-spacing:.4px; }
 .delivery-fee-dash { color:#999; font-size:.9em; }
 .fee-tooltip-wrap { position:relative; display:inline-block; }
-.fee-info-icon {
-    display:inline-block; width:16px; height:16px; line-height:16px;
-    text-align:center; font-size:11px; font-weight:700;
-    border-radius:50%; background:#3c4cb8; color:#fff;
-    margin-left:4px; cursor:help;
-}
-.fee-tooltip-wrap .fee-tooltip {
-    visibility:hidden; opacity:0;
-    position:absolute; z-index:10; top:22px; left:0;
-    background:#1f2740; color:#fff; padding:8px 10px;
-    border-radius:8px; font-size:.72em; width:210px;
-    transition:.15s;
-    box-shadow:0 4px 12px rgba(10,20,45,.25);
-}
-.fee-tooltip-wrap:hover .fee-tooltip {
-    visibility:visible; opacity:1;
-}
+.fee-info-icon { display:inline-block; width:16px; height:16px; line-height:16px; text-align:center; font-size:11px; font-weight:700; border-radius:50%; background:#3c4cb8; color:#fff; margin-left:4px; cursor:help; }
+.fee-tooltip-wrap .fee-tooltip { visibility:hidden; opacity:0; position:absolute; z-index:10; top:22px; left:0; background:#1f2740; color:#fff; padding:8px 10px; border-radius:8px; font-size:.72em; width:210px; transition:.15s; box-shadow:0 4px 12px rgba(10,20,45,.25); }
+.fee-tooltip-wrap:hover .fee-tooltip { visibility:visible; opacity:1; }
 .back-btn { width:180px; margin:22px auto 0; display:block; background:#c2c7d6; color:#2f377d; border:none; padding:13px 0; border-radius:8px; font-size:1.08em; font-weight:600; cursor:pointer; text-align:center; text-decoration:none; transition:.18s; }
 .back-btn:hover { background:#b4bac9; color:#162040; }
+.refund-policy-box { background:#f5f8ff; border:1px solid #d7e2f5; padding:12px 16px; border-radius:10px; font-size:.78em; color:#2c3e60; margin:0 0 26px; line-height:1.4em; }
+.flash { padding:12px 16px; border-radius:10px; margin:0 0 22px; font-size:.85em; font-weight:600; }
+.flash.success { background:#e3fbe6; color:#1d7a43; border:1px solid #b6e9c0; }
+.flash.error { background:#fde9e9; color:#b82323; border:1px solid #f5c2c2; }
 @media (max-width:900px){
   .bookings-main-layout { flex-direction:column; gap:0; }
   .bookings-sidebar { width:100%; border-radius:13px 13px 0 0; display:flex; justify-content:space-around; padding:0; }
@@ -196,11 +252,26 @@ document.addEventListener('DOMContentLoaded',()=>{
     <div class="bookings-content">
         <div class="bookings-title">My Bookings</div>
 
+        <?php if ($flash_success): ?>
+            <div class="flash success"><?= htmlspecialchars($flash_success) ?></div>
+        <?php endif; ?>
+        <?php if ($flash_error): ?>
+            <div class="flash error"><?= htmlspecialchars($flash_error) ?></div>
+        <?php endif; ?>
+
+        <div class="refund-policy-box">
+            <strong>Cancellation Refund Policy</strong><br>
+            <?php foreach (buildRefundPolicyLines() as $line): ?>
+                <?= htmlspecialchars($line) ?><br>
+            <?php endforeach; ?>
+            Security deposit is non-refundable.
+        </div>
+
         <?php foreach (['Pending','Upcoming','Completed','Cancelled'] as $section): ?>
             <div id="section-<?= $section ?>" class="bookings-content-section" style="display:none;">
-                <h3 class="bookings-section-title"><?= $section ?> Bookings</h3>
+                <h3 class="bookings-section-title" style="margin:0 0 14px;font-size:1.05em;color:#2f377d;"><?= htmlspecialchars($section) ?> Bookings</h3>
                 <?php if (empty($bookings[$section])): ?>
-                    <div class="no-bookings">No <?= strtolower($section) ?> bookings found.</div>
+                    <div class="no-bookings" style="color:#666;font-size:.92em;">No <?= strtolower($section) ?> bookings found.</div>
                 <?php else: ?>
                     <table class="booking-table">
                         <tr>
@@ -229,20 +300,17 @@ document.addEventListener('DOMContentLoaded',()=>{
                                 $has_delivery          = !empty($b['delivery_service_type']);
                                 $delivery_fee          = $b['delivery_service_fee'];
                                 $delivery_fee_is_set   = $has_delivery && $delivery_fee !== null;
-
-                                // Badge only while fee pending
                                 $show_delivery_badge   = $has_delivery && !$delivery_fee_is_set;
 
                                 $base_total = ($duration_days * (float)$b['daily_rate']) + (float)$b['security_deposit'];
-
                                 if ($has_delivery) {
                                     if ($delivery_fee_is_set) {
-                                        $fee_included_in_total = (abs((float)$b['total_price'] - ($base_total + (float)$delivery_fee)) < 0.01);
+                                        $fee_included_in_total = abs((float)$b['total_price'] - ($base_total + (float)$delivery_fee)) < 0.01;
                                     } else {
                                         $fee_included_in_total = false;
                                     }
                                 } else {
-                                    $fee_included_in_total = (abs((float)$b['total_price'] - $base_total) < 0.01);
+                                    $fee_included_in_total = abs((float)$b['total_price'] - $base_total) < 0.01;
                                 }
 
                                 $can_pay = (
@@ -262,8 +330,11 @@ document.addEventListener('DOMContentLoaded',()=>{
                             ?>
                             <tr>
                                 <td>
-                                    <?php if (!empty($b['car_image'])): ?>
-                                        <img class="booking-car-img-thumb" src="data:image/jpeg;base64,<?= base64_encode($b['car_image']) ?>" alt="Car">
+                                    <?php if (!empty($b['car_image_id'])): ?>
+                                        <img class="booking-car-img-thumb"
+                                             src="get_car_image.php?car_image_id=<?= (int)$b['car_image_id'] ?>"
+                                             alt="Car Image"
+                                             onerror="this.src='/assets/images/no-car.png'">
                                     <?php else: ?>
                                         <img class="booking-car-img-thumb" src="/assets/images/no-car.png" alt="No Car Image">
                                     <?php endif; ?>
@@ -291,7 +362,7 @@ document.addEventListener('DOMContentLoaded',()=>{
                                                 <span class="fee-info-icon">i</span>
                                                 <span class="fee-tooltip">
                                                     Delivery service fee has been added.<br>
-                                                    Total now includes base + deposit + delivery fee.
+                                                    Total includes base + deposit + delivery fee.
                                                 </span>
                                             </span>
                                         <?php endif; ?>
@@ -317,11 +388,12 @@ document.addEventListener('DOMContentLoaded',()=>{
 
                                     <?php if ($is_cancellable): ?>
                                         <form action="cancel_booking.php" method="post" style="display:inline;" onsubmit="return confirm('Are you sure you want to cancel this booking?');">
+                                            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>">
                                             <input type="hidden" name="booking_id" value="<?= (int)$b['booking_id'] ?>">
                                             <button type="submit" class="action-btn cancel">Cancel</button>
                                         </form>
                                     <?php elseif (($section === 'Pending' || $section === 'Upcoming') && !$is_cancellable): ?>
-                                        <span style="color:#999;font-size:0.88em;">Cannot cancel &lt; 24h</span>
+                                        <span style="color:#999;font-size:0.78em;display:inline-block;max-width:110px;line-height:1.2em;">Cannot cancel &lt; 24h</span>
                                     <?php endif; ?>
                                 </td>
                             </tr>

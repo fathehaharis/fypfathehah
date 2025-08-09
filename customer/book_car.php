@@ -61,7 +61,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($pickup_dt < $now) {
                 $errors[] = "Pickup date/time must be in the future.";
             }
-            // Must be at least 1 day rental (strictly greater than pickup date)
+            // Must be at least 1 day rental
             if ($return_dt <= $pickup_dt || $return_dt->diff($pickup_dt)->days < 1) {
                 $errors[] = "Return date must be at least 1 day after pickup date (daily rental).";
             }
@@ -113,11 +113,18 @@ $stmt->execute();
 $result = $stmt->get_result();
 $car = $result->fetch_assoc();
 $stmt->close();
+
 if (!$car) {
     die("Car not found.");
 }
 
-// Unavailable (confirmed/pending) date ranges
+/* NEW minimal fix: block booking if car status is not 'available'
+   (since enum is now ('available','unavailable')) */
+if (strcasecmp($car['status'], 'available') !== 0) {
+    die("This car is currently unavailable.");
+}
+
+// Unavailable (confirmed/pending) date ranges (client-side guidance only)
 $today = date("Y-m-d");
 $booking_sql = "
     SELECT pickup_datetime, return_datetime
@@ -141,6 +148,11 @@ $booking_stmt->close();
 
 // Prefill
 $booking_data      = $_SESSION['booking_data'] ?? [];
+// If stored booking data belongs to a different car, ignore it
+if (!empty($booking_data) && (int)$booking_data['car_id'] !== $car_id) {
+    $booking_data = [];
+}
+
 $pickup_dt_s       = $booking_data['pickup_datetime'] ?? '';
 $return_dt_s       = $booking_data['return_datetime'] ?? '';
 $pickup_date_pref  = $pickup_dt_s ? substr($pickup_dt_s, 0, 10) : '';
@@ -482,7 +494,6 @@ document.addEventListener('DOMContentLoaded', () => {
             e.preventDefault();
             return;
         }
-        // Ensure pickup is future
         const pickupDT = new Date(pickupDateInput.value + 'T' + pickupTimeSelect.value + ':00');
         const now = new Date();
         if (pickupDT <= now){
@@ -490,7 +501,6 @@ document.addEventListener('DOMContentLoaded', () => {
             e.preventDefault();
             return;
         }
-        // Ensure return date at least +1 day
         const returnDT = new Date(returnDateInput.value + 'T' + pickupTimeSelect.value + ':00');
         const dayDiff = (returnDT - pickupDT) / (1000*60*60*24);
         if (dayDiff < 1){
