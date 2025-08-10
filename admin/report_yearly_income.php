@@ -4,39 +4,32 @@ session_start();
 if (!isset($_SESSION['admin_id'])) { header("Location: admin_login.php"); exit; }
 date_default_timezone_set('Asia/Kuala_Lumpur');
 
-// Year and month selection
+// Year range config
 $year_start = 2015;
 $year_end = 2035;
-$current_year = date('Y');
-$current_month = date('n');
 
-$selected_year = isset($_GET['year']) ? intval($_GET['year']) : $current_year;
-if ($selected_year < $year_start || $selected_year > $year_end) $selected_year = $current_year;
+// Filter years
+$filter_start = isset($_GET['start_year']) ? intval($_GET['start_year']) : $year_start;
+$filter_end = isset($_GET['end_year']) ? intval($_GET['end_year']) : $year_end;
+if ($filter_start < $year_start || $filter_start > $year_end) $filter_start = $year_start;
+if ($filter_end < $year_start || $filter_end > $year_end || $filter_end < $filter_start) $filter_end = $year_end;
 
-$selected_month = isset($_GET['month']) ? intval($_GET['month']) : $current_month;
-if ($selected_month < 1 || $selected_month > 12) $selected_month = $current_month;
+$years = [];
+for ($y = $filter_start; $y <= $filter_end; $y++) {
+    $years[] = $y;
+}
 
-// Months for dropdown
-$months_dropdown = [
-    1 => 'January', 2 => 'February', 3 => 'March', 4 => 'April',
-    5 => 'May', 6 => 'June', 7 => 'July', 8 => 'August',
-    9 => 'September', 10 => 'October', 11 => 'November', 12 => 'December'
-];
-
-// Days in selected month/year
-$days_in_month = cal_days_in_month(CAL_GREGORIAN, $selected_month, $selected_year);
-
+// Report data
 $report = [];
 $grand_total = 0.0;
 $grand_sales = 0;
 $grand_refunds = 0.0;
 $grand_net_income = 0.0;
 
-// Initialize days
-for ($d = 1; $d <= $days_in_month; $d++) {
-    $date_str = sprintf("%02d/%02d/%d", $d, $selected_month, $selected_year);
-    $report[$d] = [
-        'date' => $date_str,
+// Initialize report array
+foreach ($years as $year) {
+    $report[$year] = [
+        'year' => $year,
         'num_sales' => 0,
         'amount' => 0.00,
         'refunds' => 0.00,
@@ -44,77 +37,78 @@ for ($d = 1; $d <= $days_in_month; $d++) {
     ];
 }
 
-// Main daily income query (no payment method breakdown)
-$sql = "SELECT 
-            DAY(p.payment_date) AS day,
-            COUNT(*) AS num_sales,
-            SUM(p.amount) AS total_income
+// Query: payments per year (with filter)
+$sql = "SELECT YEAR(p.payment_date) AS year,
+               COUNT(*) AS num_sales,
+               SUM(p.amount) AS total_income
         FROM payment p
         LEFT JOIN booking b ON p.booking_id = b.booking_id
         WHERE p.payment_status='paid'
-          AND YEAR(p.payment_date)=?
-          AND MONTH(p.payment_date)=?
           AND (b.status IS NULL OR b.status NOT IN ('cancelled','rejected'))
-        GROUP BY day";
+          AND YEAR(p.payment_date) >= ? AND YEAR(p.payment_date) <= ?
+        GROUP BY year";
 $stmt = $conn->prepare($sql);
-$stmt->bind_param("ii", $selected_year, $selected_month);
+$stmt->bind_param("ii", $filter_start, $filter_end);
 $stmt->execute();
 $res = $stmt->get_result();
 while ($row = $res->fetch_assoc()) {
-    $d = intval($row['day']);
-    $report[$d]['num_sales'] = $row['num_sales'];
-    $report[$d]['amount'] = $row['total_income'];
-    $grand_total += $row['total_income'];
-    $grand_sales += $row['num_sales'];
+    $year = intval($row['year']);
+    if (isset($report[$year])) {
+        $report[$year]['num_sales'] = $row['num_sales'];
+        $report[$year]['amount'] = $row['total_income'];
+        $grand_total += $row['total_income'];
+        $grand_sales += $row['num_sales'];
+    }
 }
 $stmt->close();
 
-// Refunds processed per day (MUST be refund_status = 'processed')
-$sql = "SELECT DAY(created_at) AS day, SUM(amount) AS total_refund
+// Refunds processed per year (refund_status = 'processed', with filter)
+$sql = "SELECT YEAR(created_at) AS year, SUM(amount) AS total_refund
         FROM refunds
-        WHERE YEAR(created_at)=?
-          AND MONTH(created_at)=?
-          AND refund_status = 'processed'
-        GROUP BY day";
+        WHERE refund_status = 'processed'
+          AND YEAR(created_at) >= ? AND YEAR(created_at) <= ?
+        GROUP BY year";
 $stmt = $conn->prepare($sql);
-$stmt->bind_param("ii", $selected_year, $selected_month);
+$stmt->bind_param("ii", $filter_start, $filter_end);
 $stmt->execute();
 $res = $stmt->get_result();
 while ($row = $res->fetch_assoc()) {
-    $d = intval($row['day']);
-    $report[$d]['refunds'] = $row['total_refund'];
-    $grand_refunds += $row['total_refund'];
+    $year = intval($row['year']);
+    if (isset($report[$year])) {
+        $report[$year]['refunds'] = $row['total_refund'];
+        $grand_refunds += $row['total_refund'];
+    }
 }
 $stmt->close();
 
-// Calculate NET INCOME per day (income - refunds)
-for ($d = 1; $d <= $days_in_month; $d++) {
-    $report[$d]['net_income'] = $report[$d]['amount'] - $report[$d]['refunds'];
-    $grand_net_income += $report[$d]['net_income'];
+// Calculate NET INCOME per year
+foreach ($years as $year) {
+    $report[$year]['net_income'] = $report[$year]['amount'] - $report[$year]['refunds'];
+    $grand_net_income += $report[$year]['net_income'];
 }
 
-// Chart.js data (use NET INCOME for chart)
+// Prepare data for chart.js (NET INCOME)
 $chart_labels = [];
 $chart_net_income = [];
-for ($d = 1; $d <= $days_in_month; $d++) {
-    $chart_labels[] = $report[$d]['date'];
-    $chart_net_income[] = floatval($report[$d]['net_income']);
+foreach ($years as $year) {
+    $chart_labels[] = $year;
+    $chart_net_income[] = floatval($report[$year]['net_income']);
 }
 
 // Excel export
 if(isset($_GET['export']) && $_GET['export'] == "excel"){
     header("Content-Type: application/vnd.ms-excel");
-    header("Content-Disposition: attachment; filename=daily_income_report_{$selected_year}_{$selected_month}.xls");
+    header("Content-Disposition: attachment; filename=yearly_income_report_{$filter_start}_{$filter_end}.xls");
     echo "<table border='1'>";
-    echo "<tr><th colspan='5' style='font-size:18px;text-align:left'>Daily Income Report</th></tr>";
-    echo "<tr><th>Date</th><th>No. of Sales</th><th>Total Income (RM)</th><th>Refunds</th><th>Net Income (RM)</th></tr>";
-    foreach ($report as $row) {
+    echo "<tr><th colspan='5' style='font-size:18px;text-align:left'>Yearly Income Report</th></tr>";
+    echo "<tr><th>Year</th><th>No. of Sales</th><th>Total Income (RM)</th><th>Refunds (RM)</th><th>Net Income (RM)</th></tr>";
+    foreach ($years as $year) {
         echo "<tr>";
-        echo "<td>{$row['date']}</td>";
-        echo "<td>{$row['num_sales']}</td>";
-        echo "<td>".number_format($row['amount'], 2)."</td>";
-        echo "<td>".number_format($row['refunds'], 2)."</td>";
-        echo "<td>".number_format($row['net_income'], 2)."</td>";
+        echo "<td>{$year}</td>";
+        echo "<td>{$report[$year]['num_sales']}</td>";
+        echo "<td>".number_format($report[$year]['amount'], 2)."</td>";
+        echo "<td>".number_format($report[$year]['refunds'], 2)."</td>";
+        echo "<td>".number_format($report[$year]['net_income'], 2)."</td>";
         echo "</tr>";
     }
     echo "<tr style='font-weight:bold'><td>Total</td><td>{$grand_sales}</td><td>".number_format($grand_total, 2)."</td><td>".number_format($grand_refunds, 2)."</td><td>".number_format($grand_net_income, 2)."</td></tr>";
@@ -131,13 +125,7 @@ include 'admin_header.php';
     margin-bottom: 18px;
     align-items: center;
 }
-.report-search-bar label {
-    font-size: 1em;
-    color: #325d92;
-    font-weight: 600;
-    margin-right: 4px;
-}
-.report-search-bar select {
+.report-search-bar select, .report-search-bar button, .report-search-bar a {
     padding: 9px 14px;
     border-radius: 7px;
     border: 1.5px solid #b5bee5;
@@ -146,17 +134,16 @@ include 'admin_header.php';
     min-width: 110px;
 }
 .report-search-bar button, .report-search-bar a {
-    padding: 9px 19px;
     background: #2b5cbc;
     color: #fff;
     border: none;
-    border-radius: 7px;
     font-weight: 600;
     font-size: 1.03em;
     cursor: pointer;
     transition: background 0.14s;
     text-decoration: none;
     display: inline-block;
+    min-width: 0;
 }
 .report-search-bar button:hover, .report-search-bar a:hover {
     background: #243570;
@@ -196,7 +183,6 @@ include 'admin_header.php';
 .report-table tfoot td {font-weight:700;}
 @media (max-width: 900px) {
     .report-table th, .report-table td { font-size: 0.97em; padding: 8px 6px; }
-    .report-search-bar select { width: 100px; }
 }
 .report-breadcrumb {
     font-size: 1em;
@@ -228,42 +214,42 @@ include 'admin_header.php';
 <div class="report-main-panel">
     <div class="report-breadcrumb">
         <a href="admin_dashboard.php">Dashboard</a>
+        / <a href="report_daily_income.php">Daily</a>
         / <a href="report_monthly_income.php">Monthly</a>
-        / <a href="report_yearly_income.php">Yearly</a>
         / <a href="report_popular_car.php">Popular Car</a>
-        / Daily Income Report
+        / Yearly Income Report
     </div>
-    <h2 style="color:#2b5cbc;font-weight:800;letter-spacing:1px;">Daily Income Report</h2>
-    <form class="report-search-bar" method="get" action="report_daily_income.php" autocomplete="off">
-        <label for="month">Month</label>
-        <select name="month" id="month">
-            <?php foreach ($months_dropdown as $mn => $mlabel): ?>
-                <option value="<?= $mn ?>" <?= ($mn == $selected_month ? 'selected' : '') ?>><?= $mlabel ?></option>
-            <?php endforeach; ?>
-        </select>
-        <label for="year">Year</label>
-        <select name="year" id="year">
+    <h2 style="color:#2b5cbc;font-weight:800;letter-spacing:1px;">Yearly Income Report</h2>
+    <form class="report-search-bar" method="get" action="report_yearly_income.php" autocomplete="off">
+        <label for="start_year">From</label>
+        <select name="start_year" id="start_year">
             <?php for ($y = $year_start; $y <= $year_end; $y++): ?>
-                <option value="<?= $y ?>" <?= ($y == $selected_year ? 'selected' : '') ?>><?= $y ?></option>
+                <option value="<?= $y ?>" <?= ($y == $filter_start ? 'selected' : '') ?>><?= $y ?></option>
             <?php endfor; ?>
         </select>
-        <button type="submit">Submit</button>
-        <a class="excel-btn" href="?year=<?= $selected_year ?>&month=<?= $selected_month ?>&export=excel" role="button">
+        <label for="end_year">To</label>
+        <select name="end_year" id="end_year">
+            <?php for ($y = $year_start; $y <= $year_end; $y++): ?>
+                <option value="<?= $y ?>" <?= ($y == $filter_end ? 'selected' : '') ?>><?= $y ?></option>
+            <?php endfor; ?>
+        </select>
+        <button type="submit">Filter</button>
+        <a class="excel-btn" href="?start_year=<?= $filter_start ?>&end_year=<?= $filter_end ?>&export=excel" role="button">
             <i class="fa fa-file-excel-o"></i> Excel
         </a>
         <a href="admin_dashboard.php" class="excel-btn" style="margin-left:8px;background:#eaeaea;color:#254d84;border:1px solid #dbe7fb;">Back to Dashboard</a>
     </form>
     <div class="report-chart-panel">
-        <canvas id="incomeLineChart" height="120"></canvas>
+        <canvas id="incomeBarChart" height="120"></canvas>
     </div>
     <div style="overflow-x:auto;">
         <?php if ($grand_total == 0): ?>
-            <div style="color:#b00;text-align:center;margin:12px 0;">No income recorded for this month.</div>
+            <div style="color:#b00;text-align:center;margin:12px 0;">No income recorded for these years.</div>
         <?php endif; ?>
         <table class="report-table">
             <thead>
                 <tr>
-                    <th>DATE</th>
+                    <th>YEAR</th>
                     <th>NO. OF SALES</th>
                     <th>TOTAL INCOME (RM)</th>
                     <th>REFUNDS (RM)</th>
@@ -271,13 +257,13 @@ include 'admin_header.php';
                 </tr>
             </thead>
             <tbody>
-            <?php foreach ($report as $row): ?>
+            <?php foreach ($years as $year): ?>
                 <tr>
-                    <td><?= $row['date'] ?></td>
-                    <td><?= $row['num_sales'] ?></td>
-                    <td><?= number_format($row['amount'], 2) ?></td>
-                    <td><?= number_format($row['refunds'], 2) ?></td>
-                    <td><?= number_format($row['net_income'], 2) ?></td>
+                    <td><?= $year ?></td>
+                    <td><?= $report[$year]['num_sales'] ?></td>
+                    <td><?= number_format($report[$year]['amount'], 2) ?></td>
+                    <td><?= number_format($report[$year]['refunds'], 2) ?></td>
+                    <td><?= number_format($report[$year]['net_income'], 2) ?></td>
                 </tr>
             <?php endforeach; ?>
             </tbody>
@@ -296,21 +282,21 @@ include 'admin_header.php';
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script>
-const ctx = document.getElementById('incomeLineChart').getContext('2d');
-const incomeLineChart = new Chart(ctx, {
-    type: 'line',
+const ctx = document.getElementById('incomeBarChart').getContext('2d');
+const incomeBarChart = new Chart(ctx, {
+    type: 'bar',
     data: {
         labels: <?= json_encode($chart_labels) ?>,
-        datasets: [{
-            label: 'Net Income (RM)',
-            data: <?= json_encode($chart_net_income) ?>,
-            fill: false,
-            borderColor: 'rgba(33, 150, 243, 0.82)',
-            backgroundColor: 'rgba(33, 150, 243, 0.27)',
-            tension: 0.2,
-            pointBackgroundColor: '#2b5cbc',
-            pointRadius: 3
-        }]
+        datasets: [
+            {
+                label: 'Net Income (RM)',
+                data: <?= json_encode($chart_net_income) ?>,
+                backgroundColor: 'rgba(33, 150, 243, 0.82)',
+                borderColor: 'rgba(33, 150, 243, 1)',
+                borderWidth: 1,
+                maxBarThickness: 40
+            }
+        ]
     },
     options: {
         responsive: true,
@@ -329,10 +315,7 @@ const incomeLineChart = new Chart(ctx, {
         scales: {
             y: {
                 beginAtZero: true,
-                ticks: { stepSize: 100 }
-            },
-            x: {
-                title: { display: true, text: 'Days' }
+                ticks: { stepSize: 5000 }
             }
         }
     }

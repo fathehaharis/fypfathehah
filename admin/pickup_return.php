@@ -10,7 +10,7 @@ if (!isset($_SESSION['admin_id'])) {
 $tab = $_GET['tab'] ?? 'pickup';
 $date = $_GET['date'] ?? date('Y-m-d');
 
-// Query: Get bookings for this date (either pickup or return), join driver, service, car, and car_image
+// Query: Get bookings for this date (either pickup or return), join customer, service, car, and car_image
 $field = $tab == 'return' ? 'return_datetime' : 'pickup_datetime';
 
 $query = "
@@ -18,18 +18,18 @@ $query = "
       b.booking_id,
       b.$field as date_time,
       s.service_type,
-      d.full_name AS driver_name,
+      cust.full_name AS customer_name,
       c.car_id,
       c.car_brand,
       c.car_model,
       c.plate_no,
-      ci.image_path AS car_image
+      ci.image_blob AS car_image
   FROM booking b
   LEFT JOIN service s ON b.booking_id = s.booking_id
-  LEFT JOIN driver d ON b.driver_id = d.driver_id
+  LEFT JOIN customer cust ON b.cust_id = cust.cust_id
   LEFT JOIN car c ON b.car_id = c.car_id
   LEFT JOIN (
-      SELECT car_id, image_path FROM car_image WHERE car_image_id IN (
+      SELECT car_id, image_blob FROM car_image WHERE car_image_id IN (
           SELECT MIN(car_image_id) FROM car_image GROUP BY car_id
       )
   ) ci ON c.car_id = ci.car_id
@@ -239,7 +239,6 @@ $bookings = $result->fetch_all(MYSQLI_ASSOC);
     <input type="date" id="date-filter" name="date" value="<?= htmlspecialchars($date) ?>">
     <button type="submit">Filter</button>
 </form>
-<!-- Place the script here -->
 <script>
 document.addEventListener("DOMContentLoaded", function() {
     var dateInput = document.getElementById('date-filter');
@@ -274,7 +273,7 @@ document.addEventListener("DOMContentLoaded", function() {
               </a>
               <div class="booking-card-plate"><?= htmlspecialchars($b['plate_no']) ?></div>
               <div class="booking-card-row">
-                <span class="booking-card-driver"><i>👤</i> <?= htmlspecialchars($b['driver_name'] ?: 'Unassigned') ?></span>
+                <span class="booking-card-driver"><i>👤</i> <?= htmlspecialchars($b['customer_name'] ?: 'Unknown Customer') ?></span>
                 <span class="booking-card-service">
                   <!-- Delivery/Service Icon (van/truck SVG) -->
                   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
@@ -291,6 +290,5 @@ document.addEventListener("DOMContentLoaded", function() {
     <?php endif; ?>
   </div>
 </div>
-
 
 <?php include '../includes/footer.php'; ?>

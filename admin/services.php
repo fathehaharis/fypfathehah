@@ -2,123 +2,176 @@
 include '../connect.php';
 session_start();
 date_default_timezone_set('Asia/Kuala_Lumpur');
+
+// CSRF token for form security
+if (empty($_SESSION['csrf_token'])) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
+$csrf_token = $_SESSION['csrf_token'];
+
+// Admin authentication
 if (!isset($_SESSION['admin_id'])) {
     header("Location: admin_login.php");
     exit;
 }
 
-// Handle delete delivery staff
-if (isset($_POST['delete_staff']) && isset($_POST['staff_id'])) {
-    $staff_id = intval($_POST['staff_id']);
-    $conn->query("DELETE FROM delivery_staff WHERE staff_id=$staff_id");
-    header("Location: services.php");
-    exit;
-}
+// Flash messages
+$flash = $error = $add_error = $add_success = "";
 
-// Handle add delivery staff
-$add_error = $add_success = "";
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_staff'])) {
-    $username = trim($_POST['username']);
-    $full_name = trim($_POST['full_name']);
-    $password = $_POST['password'];
-    $status = (isset($_POST['status']) && $_POST['status'] === 'inactive') ? 'inactive' : 'active';
-
-    if ($username == "" || $full_name == "" || $password == "") {
-        $add_error = "Please fill in all required fields.";
+// Handle delete delivery staff (prepared statement, CSRF protected)
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_staff'], $_POST['staff_id'], $_POST['csrf_token'])) {
+    if (!hash_equals($csrf_token, $_POST['csrf_token'])) {
+        $error = "Invalid session token.";
     } else {
-        $stmt = $conn->prepare("SELECT staff_id FROM delivery_staff WHERE username = ?");
-        $stmt->bind_param("s", $username);
+        $staff_id = intval($_POST['staff_id']);
+        $stmt = $conn->prepare("DELETE FROM delivery_staff WHERE staff_id=?");
+        $stmt->bind_param("i", $staff_id);
         $stmt->execute();
-        $stmt->store_result();
-        if ($stmt->num_rows > 0) {
-            $add_error = "Username already exists.";
-        } else {
-            $hashed_pw = password_hash($password, PASSWORD_DEFAULT);
-            $stmt2 = $conn->prepare("INSERT INTO delivery_staff (username, full_name, password, status) VALUES (?, ?, ?, ?)");
-            $stmt2->bind_param("ssss", $username, $full_name, $hashed_pw, $status);
-            if ($stmt2->execute()) {
-                $add_success = "Delivery staff added successfully.";
-            } else {
-                $add_error = "Error adding staff: " . $conn->error;
-            }
-            $stmt2->close();
-        }
         $stmt->close();
+        $flash = "Delivery staff deleted.";
+        header("Location: services.php?flash=" . urlencode($flash));
+        exit;
     }
 }
 
-// Handle staff assignment
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_service'])) {
-    $service_id = intval($_POST['service_id']);
-    $staff_id = !empty($_POST['staff_id']) ? intval($_POST['staff_id']) : null;
-    $sql = "UPDATE service SET staff_id = ? WHERE service_id = ?";
-    $stmt = $conn->prepare($sql);
-    $stmt->bind_param("ii", $staff_id, $service_id);
-    $stmt->execute();
-    $stmt->close();
-    header("Location: services.php");
-    exit;
+// Handle add delivery staff (prepared statement, CSRF protected)
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_staff'], $_POST['csrf_token'])) {
+    if (!hash_equals($csrf_token, $_POST['csrf_token'])) {
+        $add_error = "Invalid session token.";
+    } else {
+        $username = trim($_POST['username']);
+        $full_name = trim($_POST['full_name']);
+        $password = $_POST['password'];
+        $status = (isset($_POST['status']) && $_POST['status'] === 'inactive') ? 'inactive' : 'active';
+
+        if ($username == "" || $full_name == "" || $password == "") {
+            $add_error = "Please fill in all required fields.";
+        } else {
+            $stmt = $conn->prepare("SELECT staff_id FROM delivery_staff WHERE username = ?");
+            $stmt->bind_param("s", $username);
+            $stmt->execute();
+            $stmt->store_result();
+            if ($stmt->num_rows > 0) {
+                $add_error = "Username already exists.";
+            } else {
+                $hashed_pw = password_hash($password, PASSWORD_DEFAULT);
+                $stmt2 = $conn->prepare("INSERT INTO delivery_staff (username, full_name, password, status) VALUES (?, ?, ?, ?)");
+                $stmt2->bind_param("ssss", $username, $full_name, $hashed_pw, $status);
+                if ($stmt2->execute()) {
+                    $add_success = "Delivery staff added successfully.";
+                } else {
+                    $add_error = "Error adding staff: " . $conn->error;
+                }
+                $stmt2->close();
+            }
+            $stmt->close();
+        }
+    }
 }
 
-// Pagination
+// Handle staff assignment to service (prepared statement, CSRF protected)
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_service'], $_POST['csrf_token'])) {
+    if (!hash_equals($csrf_token, $_POST['csrf_token'])) {
+        $error = "Invalid session token.";
+    } else {
+        $service_id = intval($_POST['service_id']);
+        $staff_id = !empty($_POST['staff_id']) ? intval($_POST['staff_id']) : null;
+        $sql = "UPDATE service SET staff_id = ? WHERE service_id = ?";
+        $stmt = $conn->prepare($sql);
+        $stmt->bind_param("ii", $staff_id, $service_id);
+        $stmt->execute();
+        $stmt->close();
+        $flash = "Delivery staff assignment updated.";
+        header("Location: services.php?flash=" . urlencode($flash));
+        exit;
+    }
+}
+
+// Pagination and filtering
 $per_page = 10;
 $page = isset($_GET['page']) && is_numeric($_GET['page']) ? intval($_GET['page']) : 1;
 $page = max($page, 1);
 $offset = ($page - 1) * $per_page;
-
-// Filtering
 $where = 'WHERE 1=1';
 $search = isset($_GET['search']) ? trim($_GET['search']) : '';
+$params = [];
+$types = '';
 if ($search !== '') {
-    $safe_search = $conn->real_escape_string($search);
     $where .= " AND (
-        s.service_type LIKE '%$safe_search%' OR 
-        s.notes LIKE '%$safe_search%' OR 
-        cu.username LIKE '%$safe_search%' OR
-        c.car_brand LIKE '%$safe_search%' OR
-        c.car_model LIKE '%$safe_search%' OR
-        b.booking_id LIKE '%$safe_search%'
+        s.service_type LIKE ? OR 
+        cu.username LIKE ? OR
+        c.car_brand LIKE ? OR
+        c.car_model LIKE ? OR
+        b.booking_id LIKE ?
     )";
+    $like = "%$search%";
+    $params = array_fill(0, 5, $like);
+    $types = str_repeat('s', 5);
 }
 
 // Get total count for pagination
-$count_sql = "SELECT COUNT(*) AS total 
+$count_sql = "
+    SELECT COUNT(*) AS total 
     FROM service s 
     JOIN booking b ON s.booking_id = b.booking_id
     JOIN car c ON b.car_id = c.car_id
     JOIN customer cu ON b.cust_id = cu.cust_id
     $where";
-$count_result = $conn->query($count_sql);
+$count_stmt = $conn->prepare($count_sql);
+if ($types) $count_stmt->bind_param($types, ...$params);
+$count_stmt->execute();
+$count_result = $count_stmt->get_result();
 $total = 0;
 if ($row = $count_result->fetch_assoc()) {
     $total = intval($row['total']);
 }
+$count_stmt->close();
 $total_pages = ceil($total / $per_page);
 
 // Fetch all delivery staff (for assignment dropdown)
 $staff_res = $conn->query("SELECT staff_id, full_name FROM delivery_staff WHERE status = 'active'");
 
-// Fetch all services -- Use pickup_datetime and return_datetime
-$query = "SELECT s.*, b.cust_id, c.car_brand, c.car_model, cu.username AS customer_name,
-                 b.pickup_datetime, b.return_datetime
-          FROM service s
-          JOIN booking b ON s.booking_id = b.booking_id
-          JOIN car c ON b.car_id = c.car_id
-          JOIN customer cu ON b.cust_id = cu.cust_id
-          $where
-          ORDER BY s.service_id DESC
-          LIMIT $per_page OFFSET $offset";
-$result = $conn->query($query);
+// Fetch all services for table
+$query = "
+    SELECT s.*, b.cust_id, c.car_brand, c.car_model, cu.username AS customer_name,
+           b.pickup_datetime, b.return_datetime
+    FROM service s
+    JOIN booking b ON s.booking_id = b.booking_id
+    JOIN car c ON b.car_id = c.car_id
+    JOIN customer cu ON b.cust_id = cu.cust_id
+    $where
+    ORDER BY s.service_id DESC
+    LIMIT ? OFFSET ?";
+if ($types) {
+    $bind_types = $types . "ii";
+    $params[] = $per_page;
+    $params[] = $offset;
+    $data_stmt = $conn->prepare($query);
+    $data_stmt->bind_param($bind_types, ...$params);
+} else {
+    $data_stmt = $conn->prepare($query);
+    $data_stmt->bind_param("ii", $per_page, $offset);
+}
+$data_stmt->execute();
+$result = $data_stmt->get_result();
 
 $services = [];
 while ($row = $result->fetch_assoc()) {
     $services[] = $row;
 }
-// fetch all staff for display in table
+$data_stmt->close();
+
+// Fetch all staff for display in table
 $all_staff = [];
 $sres = $conn->query("SELECT staff_id, full_name FROM delivery_staff");
-while($r = $sres->fetch_assoc()) {
+while ($r = $sres->fetch_assoc()) {
     $all_staff[$r['staff_id']] = $r['full_name'];
+}
+$sres->close();
+
+// Flash message from GET (after redirect)
+if (isset($_GET['flash']) && $_GET['flash']) {
+    $flash = htmlspecialchars($_GET['flash']);
 }
 ?>
 <?php include 'admin_header.php'; ?>
@@ -282,6 +335,8 @@ body {
     <div class="services-breadcrumb">
         <a href="admin_dashboard.php">Dashboard</a> / Services & Delivery Staff
     </div>
+    <?php if ($flash): ?><div class="msg-success"><?= $flash ?></div><?php endif; ?>
+    <?php if ($error): ?><div class="msg-error"><?= $error ?></div><?php endif; ?>
 
     <div class="staff-form">
         <h3>Add Delivery Staff</h3>
@@ -292,6 +347,7 @@ body {
             <div class="msg-error"><?= htmlspecialchars($add_error) ?></div>
         <?php endif; ?>
         <form method="post" autocomplete="off">
+            <input type="hidden" name="csrf_token" value="<?= $csrf_token ?>">
             <div class="form-row">
                 <label class="form-label" for="username">Username<span style="color:#d42d2d;">*</span></label>
                 <input class="form-input" type="text" name="username" id="username" required maxlength="50">
@@ -317,41 +373,42 @@ body {
         </form>
     </div>
 
-<!-- DELIVERY STAFF TABLE (Only Staff Info) -->
-<h2 style="color:#2b5cbc;font-weight:800;letter-spacing:1px;">Delivery Staff</h2>
-<div style="overflow-x:auto;">
-<table class="services-table">
-    <thead>
-        <tr>
-            <th style="width:60px;">#</th>
-            <th style="width:140px;">Username</th>
-            <th style="width:180px;">Full Name</th>
-            <th style="width:100px;">Status</th>
-            <th style="width:140px;">Action</th>
-        </tr>
-    </thead>
-    <tbody>
-    <?php
-    $stafflist_res = $conn->query("SELECT * FROM delivery_staff ORDER BY staff_id DESC");
-    $i = 1;
-    while ($staff = $stafflist_res->fetch_assoc()): ?>
-        <tr>
-            <td><?= $i++ ?></td>
-            <td><?= htmlspecialchars($staff['username']) ?></td>
-            <td><?= htmlspecialchars($staff['full_name']) ?></td>
-            <td><?= htmlspecialchars(ucfirst($staff['status'])) ?></td>
-            <td style="display:flex;gap:7px;">
-                <a class="edit-btn" href="edit_delivery_staff.php?id=<?= $staff['staff_id'] ?>">Edit</a>
-                <form method="post" onsubmit="return confirm('Are you sure you want to delete this staff?');" style="display:inline;">
-                    <input type="hidden" name="staff_id" value="<?= $staff['staff_id'] ?>">
-                    <button type="submit" name="delete_staff" class="delete-btn" style="background:#d92222;color:#fff;">Delete</button>
-                </form>
-            </td>
-        </tr>
-    <?php endwhile; ?>
-    </tbody>
-</table>
-</div>
+    <!-- DELIVERY STAFF TABLE -->
+    <h2 style="color:#2b5cbc;font-weight:800;letter-spacing:1px;">Delivery Staff</h2>
+    <div style="overflow-x:auto;">
+    <table class="services-table">
+        <thead>
+            <tr>
+                <th style="width:60px;">#</th>
+                <th style="width:140px;">Username</th>
+                <th style="width:180px;">Full Name</th>
+                <th style="width:100px;">Status</th>
+                <th style="width:140px;">Action</th>
+            </tr>
+        </thead>
+        <tbody>
+        <?php
+        $stafflist_res = $conn->query("SELECT * FROM delivery_staff ORDER BY staff_id DESC");
+        $i = 1;
+        while ($staff = $stafflist_res->fetch_assoc()): ?>
+            <tr>
+                <td><?= $i++ ?></td>
+                <td><?= htmlspecialchars($staff['username']) ?></td>
+                <td><?= htmlspecialchars($staff['full_name']) ?></td>
+                <td><?= htmlspecialchars(ucfirst($staff['status'])) ?></td>
+                <td style="display:flex;gap:7px;">
+                    <a class="edit-btn" href="edit_delivery_staff.php?id=<?= $staff['staff_id'] ?>">Edit</a>
+                    <form method="post" style="display:inline;" onsubmit="return confirm('Are you sure you want to delete this staff?');">
+                        <input type="hidden" name="staff_id" value="<?= $staff['staff_id'] ?>">
+                        <input type="hidden" name="csrf_token" value="<?= $csrf_token ?>">
+                        <button type="submit" name="delete_staff" class="delete-btn">Delete</button>
+                    </form>
+                </td>
+            </tr>
+        <?php endwhile; ?>
+        </tbody>
+    </table>
+    </div>
 
     <h2 style="color:#2b5cbc;font-weight:800;letter-spacing:1px;">Services & Delivery Assignment</h2>
     <form class="services-search-bar" method="get" action="services.php" autocomplete="off">
@@ -398,12 +455,29 @@ body {
                     <td>
                         <?= $row['return_datetime'] ? date('d/m/Y H:i', strtotime($row['return_datetime'])) : '-' ?>
                     </td>
-                    <td><?= htmlspecialchars($row['notes']) ?></td>
+                    <td>
+                        <?php
+                        if ($row['service_type'] === 'pickup_and_return') {
+                            echo "Delivery: " . htmlspecialchars($row['delivery_location'] ?? '') . "<br>";
+                            echo "Return: " . htmlspecialchars($row['return_location'] ?? '');
+                        } elseif ($row['service_type'] === 'delivery') {
+                            echo htmlspecialchars($row['delivery_location'] ?? '');
+                        } else {
+                            echo '-';
+                        }
+                        ?>
+                    </td>
                     <td>
                         <?= htmlspecialchars(ucwords(str_replace('_', ' ', $row['status']))) ?>
                     </td>
                     <td>
-                        <select name="staff_id">
+                        <?php
+                        $assigned = (isset($row['staff_id']) && $row['staff_id'] && isset($all_staff[$row['staff_id']]))
+                            ? htmlspecialchars($all_staff[$row['staff_id']])
+                            : '<span style="color:#888;">Unassigned</span>';
+                        echo $assigned;
+                        ?>
+                        <select name="staff_id" style="margin-top:6px;">
                             <option value="">-- Unassigned --</option>
                             <?php
                             mysqli_data_seek($staff_res, 0);
@@ -413,10 +487,9 @@ body {
                                 <option value="<?= $staff['staff_id'] ?>" <?= $sel ?>><?= htmlspecialchars($staff['full_name']) ?></option>
                             <?php endwhile; ?>
                         </select>
-                        <?php if (isset($row['staff_id']) && $row['staff_id'] && isset($all_staff[$row['staff_id']])): ?>
-                        <?php endif; ?>
                     </td>
                     <td>
+                        <input type="hidden" name="csrf_token" value="<?= $csrf_token ?>">
                         <input type="hidden" name="service_id" value="<?= $row['service_id'] ?>">
                         <button type="submit" name="update_service" class="assign-btn">Save</button>
                     </td>
@@ -438,6 +511,7 @@ body {
         $range = 2;
         for ($p = max(1, $page - $range); $p <= min($total_pages, $page + $range); $p++): ?>
             <?php if ($p == $page): ?>
+                <span class="current"><?= $p ?></span>
             <?php else: ?>
                 <a href="?page=<?= $p ?><?= $search ? '&search=' . urlencode($search) : '' ?>"><?= $p ?></a>
             <?php endif; ?>

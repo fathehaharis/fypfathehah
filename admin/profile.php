@@ -8,6 +8,8 @@ if (!isset($_SESSION['admin_id'])) {
 include '../connect.php';
 include 'admin_header.php';
 
+function h($v){ return htmlspecialchars($v ?? '', ENT_QUOTES, 'UTF-8'); }
+
 $admin_id = $_SESSION['admin_id'];
 
 // Fetch admin details
@@ -94,11 +96,11 @@ if (!$user) {
 <div class="profile-container">
     <div class="profile-title">Admin Profile</div>
     <table class="profile-table">
-        <tr><th>Full Name</th><td><?= htmlspecialchars($user['full_name']) ?></td></tr>
-        <tr><th>Username</th><td><?= htmlspecialchars($user['username']) ?></td></tr>
-        <tr><th>Email</th><td><?= htmlspecialchars($user['email']) ?></td></tr>
+        <tr><th>Full Name</th><td><?= h($user['full_name']) ?></td></tr>
+        <tr><th>Username</th><td><?= h($user['username']) ?></td></tr>
+        <tr><th>Email</th><td><?= h($user['email']) ?></td></tr>
     </table>
-    <a class="profile-edit-btn" href="edit_profile.php">Edit Profile</a>
+    <a class="profile-edit-btn" href="edit_profile_admin.php">Edit Profile</a>
     <button class="back-btn" onclick="window.location.href='admin_dashboard.php'">Back</button>
 </div>
 

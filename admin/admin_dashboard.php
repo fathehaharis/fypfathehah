@@ -2,6 +2,10 @@
 session_start();
 include '../connect.php';
 
+ini_set('display_errors', 1);
+ini_set('display_startup_errors', 1);
+error_reporting(E_ALL);
+
 date_default_timezone_set('Asia/Kuala_Lumpur');
 
 if (!isset($_SESSION['admin_id'])) {
@@ -10,61 +14,32 @@ if (!isset($_SESSION['admin_id'])) {
 }
 
 $admin_id = (int)$_SESSION['admin_id'];
-
-/* --------------------------------------------------------------------------
-   Helper Functions
--------------------------------------------------------------------------- */
-
 function fetchScalar(mysqli $conn, string $sql, string $types = '', array $params = []) {
     $stmt = $conn->prepare($sql);
-    if ($types !== '' && $params) {
-        $stmt->bind_param($types, ...$params);
-    }
-    $stmt->execute();
-    $stmt->bind_result($val);
-    $stmt->fetch();
-    $stmt->close();
+    if ($types !== '' && $params) { $stmt->bind_param($types, ...$params); }
+    $stmt->execute(); $stmt->bind_result($val); $stmt->fetch(); $stmt->close();
     return $val ?? 0;
 }
-
 function fetchRows(mysqli $conn, string $sql, string $types = '', array $params = []): array {
     $stmt = $conn->prepare($sql);
-    if ($types !== '' && $params) {
-        $stmt->bind_param($types, ...$params);
-    }
-    $stmt->execute();
-    $res = $stmt->get_result();
-    $rows = [];
-    while ($res && $row = $res->fetch_assoc()) {
-        $rows[] = $row;
-    }
-    $stmt->close();
-    return $rows;
+    if ($types !== '' && $params) { $stmt->bind_param($types, ...$params); }
+    $stmt->execute(); $res = $stmt->get_result(); $rows = [];
+    while ($res && $row = $res->fetch_assoc()) $rows[] = $row;
+    $stmt->close(); return $rows;
 }
-
-/* --------------------------------------------------------------------------
-   Admin Name
--------------------------------------------------------------------------- */
 $admin_name = '';
 $stmt = $conn->prepare("SELECT COALESCE(NULLIF(full_name,''), username) AS display_name FROM admin WHERE admin_id = ?");
 $stmt->bind_param("i", $admin_id);
-$stmt->execute();
-$stmt->bind_result($admin_name);
-$stmt->fetch();
-$stmt->close();
+$stmt->execute(); $stmt->bind_result($admin_name); $stmt->fetch(); $stmt->close();
 
-/* --------------------------------------------------------------------------
-   Dates / Time Windows
--------------------------------------------------------------------------- */
 $nowDT          = new DateTime('now');
-$oneHourLaterDT = (clone $nowDT)->modify('+1 hour');
+$threeHoursLaterDT = (clone $nowDT)->modify('+3 hour');
 $todayDate      = $nowDT->format('Y-m-d');
 $nowStr         = $nowDT->format('Y-m-d H:i:s');
-$oneHourStr     = $oneHourLaterDT->format('Y-m-d H:i:s');
+$threeHoursLaterStr = $threeHoursLaterDT->format('Y-m-d H:i:s');
+$tomorrowDate   = (clone $nowDT)->modify('+1 day')->format('Y-m-d');
 
-/* --------------------------------------------------------------------------
-   Core Dashboard Counts
--------------------------------------------------------------------------- */
+/* -------------------- Core Dashboard Counts -------------------- */
 $total_customers = fetchScalar($conn, "SELECT COUNT(*) FROM customer");
 $total_cars      = fetchScalar($conn, "SELECT COUNT(*) FROM car");
 $total_bookings  = fetchScalar($conn, "SELECT COUNT(*) FROM booking");
@@ -72,67 +47,25 @@ $total_payments  = fetchScalar($conn, "SELECT COUNT(*) FROM payment WHERE paymen
 
 $pickup_today = fetchScalar(
     $conn,
-    "SELECT COUNT(*) FROM booking 
-     WHERE DATE(pickup_datetime) = ? 
-       AND status NOT IN ('cancelled','rejected')",
+    "SELECT COUNT(*) FROM booking WHERE DATE(pickup_datetime) = ? AND status NOT IN ('cancelled','rejected')",
     's',
     [$todayDate]
 );
-
 $return_today = fetchScalar(
     $conn,
-    "SELECT COUNT(*) FROM booking 
-     WHERE DATE(return_datetime) = ? 
-       AND status NOT IN ('cancelled','rejected')",
+    "SELECT COUNT(*) FROM booking WHERE DATE(return_datetime) = ? AND status NOT IN ('cancelled','rejected')",
     's',
     [$todayDate]
 );
 
-/* Optional: current month revenue (uncomment if desired)
-$currentMonthRevenue = fetchScalar(
+/* -------------------- Alerts/Notifications -------------------- */
+// 1. Approve Customer Profile (uses profile_status per your DDL)
+$profile_approval_alerts = fetchRows(
     $conn,
-    \"SELECT COALESCE(SUM(amount),0) FROM payment 
-      WHERE payment_status='paid' 
-        AND DATE_FORMAT(payment_date,'%Y-%m') = DATE_FORMAT(CURDATE(),'%Y-%m')\"
-);
-*/
-
-/* --------------------------------------------------------------------------
-   Alerts: Pickups (inspection), Returns (inspection), Approvals, Refunds
--------------------------------------------------------------------------- */
-
-$pickup_alerts = fetchRows(
-    $conn,
-    "SELECT b.booking_id, b.pickup_datetime, c.car_brand, c.car_model, c.plate_no,
-            cust.full_name, b.pickup_mileage, b.pickup_fuel_percent
-       FROM booking b
-       JOIN car c ON b.car_id = c.car_id
-  LEFT JOIN customer cust ON b.cust_id = cust.cust_id
-      WHERE b.pickup_datetime >= ? 
-        AND b.pickup_datetime < ? 
-        AND (b.pickup_mileage IS NULL OR b.pickup_fuel_percent IS NULL)
-        AND b.status IN ('confirmed','upcoming')
-   ORDER BY b.pickup_datetime ASC",
-    'ss',
-    [$nowStr, $oneHourStr]
+    "SELECT cust_id, username, full_name FROM customer WHERE profile_status IN ('pending', 'pending_reverification') ORDER BY cust_id ASC"
 );
 
-$return_alerts = fetchRows(
-    $conn,
-    "SELECT b.booking_id, b.return_datetime, c.car_brand, c.car_model, c.plate_no,
-            cust.full_name, b.return_mileage, b.return_fuel_percent
-       FROM booking b
-       JOIN car c ON b.car_id = c.car_id
-  LEFT JOIN customer cust ON b.cust_id = cust.cust_id
-      WHERE b.return_datetime >= ?
-        AND b.return_datetime < ?
-        AND (b.return_mileage IS NULL OR b.return_fuel_percent IS NULL)
-        AND b.status IN ('confirmed','approved','upcoming','completed')
-   ORDER BY b.return_datetime ASC",
-    'ss',
-    [$nowStr, $oneHourStr]
-);
-
+// 2. Approve Booking
 $approval_alerts = fetchRows(
     $conn,
     "SELECT b.booking_id, c.car_brand, c.car_model, c.plate_no, cust.full_name, b.created_at
@@ -143,6 +76,41 @@ $approval_alerts = fetchRows(
    ORDER BY b.created_at ASC"
 );
 
+// 3. Inspection few hours before pickup
+$inspection_alerts = fetchRows(
+    $conn,
+    "SELECT b.booking_id, b.pickup_datetime, c.car_brand, c.car_model, c.plate_no,
+            cust.full_name, b.pickup_mileage, b.pickup_fuel_percent
+       FROM booking b
+       JOIN car c ON b.car_id = c.car_id
+  LEFT JOIN customer cust ON b.cust_id = cust.cust_id
+      WHERE b.pickup_datetime >= ?
+        AND b.pickup_datetime <= ?
+        AND (b.pickup_mileage IS NULL OR b.pickup_fuel_percent IS NULL)
+        AND b.status IN ('confirmed','upcoming')
+   ORDER BY b.pickup_datetime ASC",
+    'ss',
+    [$nowStr, $threeHoursLaterStr]
+);
+
+// 4. Assign service to delivery staff one day before pickup
+$service_assign_alerts = fetchRows(
+    $conn,
+    "SELECT s.service_id, s.service_type, s.staff_id, b.booking_id, b.pickup_datetime,
+            c.car_brand, c.car_model, c.plate_no, cust.full_name
+       FROM service s
+       JOIN booking b ON s.booking_id = b.booking_id
+       JOIN car c ON b.car_id = c.car_id
+  LEFT JOIN customer cust ON b.cust_id = cust.cust_id
+      WHERE DATE(b.pickup_datetime) = ?
+        AND s.staff_id IS NULL
+        AND b.status IN ('confirmed','upcoming')
+   ORDER BY b.pickup_datetime ASC",
+    's',
+    [$tomorrowDate]
+);
+
+// 5. Refund alerts
 $refund_alerts = fetchRows(
     $conn,
     "SELECT r.refund_id, r.booking_id, r.amount, r.created_at, cust.full_name,
@@ -205,6 +173,11 @@ include 'admin_header.php';
   font-weight:600; text-decoration:none; font-size:0.95em; margin-left:14px;
 }
 .alert-box a.action-btn:hover { background:#b32d2d; }
+.alert-box.alert-profile {background:#e8eaff;color:#2347b6;border:1.5px solid #b6c9fa;}
+.alert-box.alert-profile .profile-user {font-weight:700;color:#2347b6;}
+.alert-box.alert-inspection {background:#fffbe7;color:#bfa800;}
+.alert-box.alert-service {background:#e8f6fd;color:#1678b7;}
+.alert-box.alert-service .service-type {font-weight:700;color:#1678b7;}
 @media (max-width:900px){
   .admin-layout { flex-direction:column; }
   .admin-sidebar { flex-direction:row; width:100%; min-height:unset; padding:0; overflow-x:auto; }
@@ -223,10 +196,9 @@ include 'admin_header.php';
     <a href="cars.php">Cars</a>
     <a href="bookings.php">Bookings</a>
     <a href="payments.php">Payments &amp; Refunds</a>
-    <a href="services.php">Delivery Services</a>
-    <a href="report_monthly_income.php">Monthly Income Report</a>
-    <a href="report_daily_income.php">Daily Income Report</a>
-    <a href="report_most_popular_cars.php">Most Popular Cars</a>
+    <a href="delivery_staff.php">Delivery Staff</a>
+    <a href="delivery_assignment.php">Delivery Assignment</a>
+    <a href="report_daily_income.php">Report</a>
   </nav>
 
   <main class="admin-main-content">
@@ -234,18 +206,14 @@ include 'admin_header.php';
       <span class="welcome-admin">👋 Welcome<?= $admin_name ? ', ' . htmlspecialchars($admin_name) : '' ?>!</span>
     </div>
 
-    <?php if (!empty($refund_alerts)): ?>
-      <div class="alert-box alert-refund">
-        <strong>Action Required:</strong> Pending refunds awaiting processing:
+    <?php if (!empty($profile_approval_alerts)): ?>
+      <div class="alert-box alert-profile">
+        <strong>Action Required:</strong> Customers awaiting profile approval:
         <ul>
-          <?php foreach ($refund_alerts as $r): ?>
+          <?php foreach ($profile_approval_alerts as $cust): ?>
             <li>
-              <strong>Booking #<?= htmlspecialchars($r['booking_id']) ?></strong>
-              (<?= htmlspecialchars($r['car_brand']) ?> <?= htmlspecialchars($r['car_model']) ?> - <?= htmlspecialchars($r['plate_no']) ?>,
-              <?= htmlspecialchars($r['full_name']) ?>)
-              <span class="refund-amount">MYR <?= number_format((float)$r['amount'], 2) ?></span>
-              <span style="color:#888;font-size:0.9em;">Requested: <?= htmlspecialchars(date('Y-m-d', strtotime($r['created_at']))) ?></span>
-              <a class="action-btn" href="payments.php#refund-<?= (int)$r['refund_id'] ?>">Process</a>
+              <span class="profile-user"><?= htmlspecialchars($cust['full_name'] ?: $cust['username']) ?></span>
+              <a class="action-btn" href="customers.php?id=<?= (int)$cust['cust_id'] ?>">Approve</a>
             </li>
           <?php endforeach; ?>
         </ul>
@@ -267,11 +235,11 @@ include 'admin_header.php';
       </div>
     <?php endif; ?>
 
-    <?php if (!empty($pickup_alerts)): ?>
-      <div class="alert-box">
-        <strong>Reminder:</strong> Pickups in next hour needing inspection:
+    <?php if (!empty($inspection_alerts)): ?>
+      <div class="alert-box alert-inspection">
+        <strong>Reminder:</strong> Pickups in next 3 hours needing inspection:
         <ul>
-          <?php foreach ($pickup_alerts as $p): ?>
+          <?php foreach ($inspection_alerts as $p): ?>
             <li>
               <strong><?= htmlspecialchars($p['car_brand']) ?> <?= htmlspecialchars($p['car_model']) ?> (<?= htmlspecialchars($p['plate_no']) ?>)</strong>
               – Booking #<?= (int)$p['booking_id'] ?>, Pickup at <strong><?= htmlspecialchars(date('H:i', strtotime($p['pickup_datetime']))) ?></strong>
@@ -283,16 +251,35 @@ include 'admin_header.php';
       </div>
     <?php endif; ?>
 
-    <?php if (!empty($return_alerts)): ?>
-      <div class="alert-box">
-        <strong>Reminder:</strong> Returns in next hour needing inspection:
+    <?php if (!empty($service_assign_alerts)): ?>
+      <div class="alert-box alert-service">
+        <strong>Reminder:</strong> Assign service to delivery staff (for pickups tomorrow):
         <ul>
-          <?php foreach ($return_alerts as $r): ?>
+          <?php foreach ($service_assign_alerts as $s): ?>
             <li>
-              <strong><?= htmlspecialchars($r['car_brand']) ?> <?= htmlspecialchars($r['car_model']) ?> (<?= htmlspecialchars($r['plate_no']) ?>)</strong>
-              – Booking #<?= (int)$r['booking_id'] ?>, Return at <strong><?= htmlspecialchars(date('H:i', strtotime($r['return_datetime']))) ?></strong>
-              (Customer: <?= htmlspecialchars($r['full_name']) ?>)
-              <a class="action-btn" href="inspection_add.php?booking_id=<?= (int)$r['booking_id'] ?>&type=return">Inspect</a>
+              <span class="service-type"><?= htmlspecialchars(ucwords(str_replace('_',' ', $s['service_type']))) ?></span>
+              for <strong><?= htmlspecialchars($s['car_brand'].' '.$s['car_model'].' ('.$s['plate_no'].')') ?></strong>
+              – Booking #<?= (int)$s['booking_id'] ?>, Pickup at <strong><?= htmlspecialchars(date('Y-m-d H:i', strtotime($s['pickup_datetime']))) ?></strong>
+              (Customer: <?= htmlspecialchars($s['full_name']) ?>)
+              <a class="action-btn" href="delivery_assignment.php?booking_id=<?= (int)$s['booking_id'] ?>">Assign Staff</a>
+            </li>
+          <?php endforeach; ?>
+        </ul>
+      </div>
+    <?php endif; ?>
+
+    <?php if (!empty($refund_alerts)): ?>
+      <div class="alert-box alert-refund">
+        <strong>Action Required:</strong> Pending refunds awaiting processing:
+        <ul>
+          <?php foreach ($refund_alerts as $r): ?>
+            <li>
+              <strong>Booking #<?= htmlspecialchars($r['booking_id']) ?></strong>
+              (<?= htmlspecialchars($r['car_brand']) ?> <?= htmlspecialchars($r['car_model']) ?> - <?= htmlspecialchars($r['plate_no']) ?>,
+              <?= htmlspecialchars($r['full_name']) ?>)
+              <span class="refund-amount">MYR <?= number_format((float)$r['amount'], 2) ?></span>
+              <span style="color:#888;font-size:0.9em;">Requested: <?= htmlspecialchars(date('Y-m-d', strtotime($r['created_at']))) ?></span>
+              <a class="action-btn" href="payments.php#refund-<?= (int)$r['refund_id'] ?>">Process</a>
             </li>
           <?php endforeach; ?>
         </ul>
@@ -324,14 +311,7 @@ include 'admin_header.php';
         <h2><?= (int)$return_today ?></h2>
         <p>Returns Today</p>
       </div>
-      <?php /* Example extra KPI:
-      <div class="stat-card">
-        <h2><?= number_format((float)$currentMonthRevenue, 2) ?></h2>
-        <p>Revenue (This Month)</p>
-      </div>
-      */ ?>
     </div>
   </main>
 </div>
-
 <?php include '../includes/footer.php'; ?>

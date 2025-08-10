@@ -21,24 +21,19 @@ if (empty($_SESSION['csrf_token'])) {
 $csrf_token = $_SESSION['csrf_token'];
 
 /* -------------------------------------------------
-   (Optional) Refund Policy constants for display
+   Refund Policy for display (calendar days)
 ------------------------------------------------- */
-const REFUND_POLICY_STEPS = [
-    168 => 1.00, // >= 7 days
-    72  => 0.50, // >= 3 days
-    24  => 0.25, // >= 24 hours
-    0   => 0.00  // < 24 hours
+const REFUND_POLICY_DAYS = [
+    7 => 1.00,  // 7 or more days before pickup
+    3 => 0.50,  // 3-6 days
+    1 => 0.25,  // 1-2 days
+    0 => 0.00   // same day or after
 ];
-
-function buildRefundPolicyLines(): array {
+function buildRefundPolicyLinesDays(): array {
     $lines = [];
-    foreach (REFUND_POLICY_STEPS as $hrs => $rate) {
-        if ($hrs >= 24) {
-            $label = ($hrs / 24) . " day(s)";
-        } else {
-            $label = $hrs . " hour(s)";
-        }
-        $lines[] = "≥ {$label} before pickup: " . number_format($rate * 100, 0) . "% refund (excluding deposit)";
+    foreach (REFUND_POLICY_DAYS as $days => $rate) {
+        $label = $days . " calendar day" . ($days > 1 ? "s" : "");
+        $lines[] = "≥ {$label} before pickup: " . number_format($rate * 100, 0) . "% deposit refund";
     }
     return $lines;
 }
@@ -137,24 +132,26 @@ function computeDayCount(array $b): int {
     }
 }
 
+function daysToPickup(array $b): int {
+    try {
+        $now = (new DateTime('now', new DateTimeZone('Asia/Kuala_Lumpur')))->setTime(0,0,0,0);
+        $pickup = (new DateTime($b['pickup_datetime'], new DateTimeZone('Asia/Kuala_Lumpur')))->setTime(0,0,0,0);
+        return (int)$now->diff($pickup)->format('%r%a'); // negative if after pickup
+    } catch (Throwable $e) {
+        return -999;
+    }
+}
+
 function canCancel(array $b): bool {
-    // Align with server logic: cannot cancel <24h if confirmed; other statuses require future pickup.
+    // Now using calendar day logic, matching cancel_booking.php!
     $status = strtolower($b['status']);
     if (!in_array($status, ['pending','approved','waiting_verification','confirmed'], true)) {
         return false;
     }
-    try {
-        $now = new DateTime('now', new DateTimeZone('Asia/Kuala_Lumpur'));
-        $pickup = new DateTime($b['pickup_datetime'], new DateTimeZone('Asia/Kuala_Lumpur'));
-    } catch (Throwable $e) {
-        return false;
-    }
-    if ($pickup <= $now) return false;
-    $interval = $now->diff($pickup);
-    $hours_to_pickup = ($interval->days * 24) + $interval->h + ($interval->i / 60);
-
-    if ($status === 'confirmed' && $hours_to_pickup <= 24) {
-        return false;
+    $days_to_pickup = daysToPickup($b);
+    if ($days_to_pickup < 0) return false; // after pickup
+    if ($status === 'confirmed' && $days_to_pickup < 1) {
+        return false; // confirmed, less than 1 calendar day before pickup
     }
     return true;
 }
@@ -259,13 +256,15 @@ document.addEventListener('DOMContentLoaded',()=>{
             <div class="flash error"><?= htmlspecialchars($flash_error) ?></div>
         <?php endif; ?>
 
-        <div class="refund-policy-box">
-            <strong>Cancellation Refund Policy</strong><br>
-            <?php foreach (buildRefundPolicyLines() as $line): ?>
-                <?= htmlspecialchars($line) ?><br>
-            <?php endforeach; ?>
-            Security deposit is non-refundable.
-        </div>
+<div class="refund-policy-box">
+    <strong>Cancellation Refund Policy</strong><br>
+    <ul style="margin:8px 0 6px 16px; padding:0;">
+        <li>Cancel <b>7 or more calendar days</b> before pickup: <b>100% refund of rental fee</b></li>
+        <li>Cancel <b>3–6 calendar days</b> before pickup: <b>50% refund of rental fee</b></li>
+        <li>Cancel <b>1–2 calendar days</b> before pickup: <b>25% refund of rental fee</b></li>
+    </ul>
+    <span style="color:#3b4a6b;">Security deposit is non-refundable.</span>
+</div>
 
         <?php foreach (['Pending','Upcoming','Completed','Cancelled'] as $section): ?>
             <div id="section-<?= $section ?>" class="bookings-content-section" style="display:none;">
@@ -393,7 +392,7 @@ document.addEventListener('DOMContentLoaded',()=>{
                                             <button type="submit" class="action-btn cancel">Cancel</button>
                                         </form>
                                     <?php elseif (($section === 'Pending' || $section === 'Upcoming') && !$is_cancellable): ?>
-                                        <span style="color:#999;font-size:0.78em;display:inline-block;max-width:110px;line-height:1.2em;">Cannot cancel &lt; 24h</span>
+                                        <span style="color:#999;font-size:0.78em;display:inline-block;max-width:150px;line-height:1.2em;">Cannot cancel less than 1 calendar day before pickup</span>
                                     <?php endif; ?>
                                 </td>
                             </tr>

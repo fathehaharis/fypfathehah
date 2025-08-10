@@ -8,23 +8,18 @@ if (!isset($_SESSION['cust_id'])) {
 }
 
 date_default_timezone_set('Asia/Kuala_Lumpur');
-
 require '../connect.php';
 require '../vendor/autoload.php'; // PHPMailer
 
-/* ---------------- CSRF ---------------- */
-if (empty($_POST['csrf_token']) || empty($_SESSION['csrf_token']) ||
-    !hash_equals($_SESSION['csrf_token'], (string)($_POST['csrf_token'] ?? ''))) {
-    $_SESSION['cancel_error'] = "Security validation failed. Please refresh and try again.";
-    header("Location: bookings.php");
-    exit;
-}
-
-/* ------------- Validate request ------------- */
-if ($_SERVER['REQUEST_METHOD'] !== 'POST' ||
+if (
+    $_SERVER['REQUEST_METHOD'] !== 'POST' ||
+    empty($_POST['csrf_token']) ||
+    empty($_SESSION['csrf_token']) ||
+    !hash_equals($_SESSION['csrf_token'], (string)($_POST['csrf_token'] ?? '')) ||
     !isset($_POST['booking_id']) ||
-    !ctype_digit($_POST['booking_id'])) {
-    $_SESSION['cancel_error'] = "Invalid request.";
+    !ctype_digit($_POST['booking_id'])
+) {
+    $_SESSION['cancel_error'] = "Invalid or expired request.";
     header("Location: bookings.php");
     exit;
 }
@@ -32,22 +27,27 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST' ||
 $booking_id = (int)$_POST['booking_id'];
 $cust_id    = (int)$_SESSION['cust_id'];
 
-/* ------------- Refund Policy (hours => fraction) ------------- */
-const REFUND_POLICY_STEPS = [
-    168 => 1.00, // >= 7 days
-    72  => 0.50, // >= 3 days
-    24  => 0.25, // >= 24h
-    0   => 0.00  // < 24h
+/*
+ * Rental fee refund policy based on calendar days before pickup.
+ * If cancel 7+ days before: 100%
+ * 3-6 days: 50%
+ * 1-2 days: 25%
+ * Same day or after: 0%
+ * Security deposit is always non-refundable.
+ */
+const RENTAL_REFUND_POLICY_DAYS = [
+    7 => 1.00,  // 7 or more days before pickup
+    3 => 0.50,  // 3-6 days
+    1 => 0.25,  // 1-2 days
+    0 => 0.00   // Same day or after
 ];
-
-function determineRefundRate(float $hoursToPickup): float {
-    foreach (REFUND_POLICY_STEPS as $threshold => $rate) {
-        if ($hoursToPickup >= $threshold) return $rate;
+function determineRentalRefundRateDays(int $daysToPickup): float {
+    foreach (RENTAL_REFUND_POLICY_DAYS as $threshold => $rate) {
+        if ($daysToPickup >= $threshold) return $rate;
     }
     return 0.0;
 }
 
-/* ------------- Logging helper ------------- */
 function logBookingAction(mysqli $conn, int $booking_id, string $action): void {
     if ($stmt = $conn->prepare("INSERT INTO booking_log (booking_id, action) VALUES (?, ?)")) {
         $stmt->bind_param("is", $booking_id, $action);
@@ -59,7 +59,6 @@ function logBookingAction(mysqli $conn, int $booking_id, string $action): void {
 $conn->begin_transaction();
 
 try {
-    /* 1. Lock booking row (LIMIT before FOR UPDATE!) */
     $stmt = $conn->prepare("
         SELECT 
             b.booking_id,
@@ -67,17 +66,16 @@ try {
             b.car_id,
             b.pickup_datetime,
             b.return_datetime,
+            b.status,
             b.total_price,
             b.security_deposit,
-            b.status,
-            b.day_count,
-            b.daily_rate,
+            b.deposit_status,
             car.car_model,
             c.username,
             c.email
         FROM booking b
         JOIN customer c ON b.cust_id = c.cust_id
-        JOIN car ON b.car_id = car.car_id
+        JOIN car car ON b.car_id = car.car_id
         WHERE b.booking_id = ? AND b.cust_id = ?
         LIMIT 1 FOR UPDATE
     ");
@@ -91,53 +89,47 @@ try {
     }
 
     $status = strtolower($booking['status']);
-    if (!in_array($status, ['pending','approved','waiting_verification','confirmed'], true)) {
+    $depositStatus = strtolower((string)$booking['deposit_status']);
+    $cancellableStatuses = ['pending','approved','waiting_verification','confirmed'];
+    if (!in_array($status, $cancellableStatuses, true)) {
         throw new Exception("This booking cannot be cancelled in its current status.");
     }
+    if ($status === 'cancelled') {
+        throw new Exception("Booking already cancelled.");
+    }
 
-    /* 2. Hours to pickup */
+    // Calendar days to pickup
+    $nowDay = (new DateTime('now', new DateTimeZone('Asia/Kuala_Lumpur')))->setTime(0,0,0,0);
     try {
-        $now       = new DateTime('now', new DateTimeZone('Asia/Kuala_Lumpur'));
-        $pickup_dt = new DateTime($booking['pickup_datetime'], new DateTimeZone('Asia/Kuala_Lumpur'));
-        $interval  = $now->diff($pickup_dt);
-        $hours_to_pickup = ($pickup_dt > $now)
-            ? ($interval->days * 24 + $interval->h + $interval->i / 60)
-            : 0.0;
+        $pickupDay = (new DateTime($booking['pickup_datetime'], new DateTimeZone('Asia/Kuala_Lumpur')))->setTime(0,0,0,0);
     } catch (Throwable $e) {
-        $hours_to_pickup = 0.0;
+        $pickupDay = clone $nowDay;
     }
+    $days_to_pickup = (int)$nowDay->diff($pickupDay)->format('%r%a'); // negative means after pickup
 
-    /* 3. Confirmed < 24h rule */
-    if ($status === 'confirmed' && $hours_to_pickup <= 24) {
-        throw new Exception("Confirmed bookings cannot be cancelled less than 24 hours before pickup.");
+    // Prevent cancellation after pickup
+    if ($days_to_pickup < 0) {
+        throw new Exception("Cannot cancel after the pickup day has passed.");
     }
-
-    /* 4. Total paid */
-    $stmt = $conn->prepare("
-        SELECT COALESCE(SUM(amount),0) AS paid_sum
-        FROM payment
-        WHERE booking_id = ? AND payment_status = 'paid'
-        LIMIT 1
-    ");
-    $stmt->bind_param("i", $booking_id);
-    $stmt->execute();
-    $paid_row = $stmt->get_result()->fetch_assoc();
-    $stmt->close();
-    $total_paid = (float)($paid_row['paid_sum'] ?? 0);
+    // Block confirmed < 1 calendar day before pickup
+    if ($status === 'confirmed' && $days_to_pickup < 1) {
+        throw new Exception("Confirmed bookings cannot be cancelled less than 1 calendar day before pickup.");
+    }
 
     $security_deposit = (float)$booking['security_deposit'];
+    $total_price = (float)$booking['total_price'];
+    $rental_fee = max(0.0, $total_price - $security_deposit); // rental portion only
 
-    /* 5. Refund computation */
-    $refund_rate  = determineRefundRate($hours_to_pickup);
-    $base_amount  = max(0.0, $total_paid - $security_deposit); // refundable base (excludes deposit)
-    $raw_refund   = round($base_amount * $refund_rate, 2);
-    $refund_amount = max(0.0, min($raw_refund, $total_paid)); // clamp safety
+    $rental_refund_rate = determineRentalRefundRateDays($days_to_pickup);
+    $rental_refund_amount = round($rental_fee * $rental_refund_rate, 2);
 
-    /* 6. Update booking status (guard) */
+    // DB update: mark status as cancelled (other refund logic as needed)
     $update = $conn->prepare("
         UPDATE booking
-        SET status = 'cancelled'
-        WHERE booking_id = ? AND status NOT IN ('cancelled','completed','rejected')
+        SET status = 'cancelled',
+            updated_at = NOW()
+        WHERE booking_id = ?
+          AND status NOT IN ('cancelled','completed','rejected')
     ");
     $update->bind_param("i", $booking_id);
     $update->execute();
@@ -147,30 +139,38 @@ try {
     }
     $update->close();
 
-    /* 7. Insert refund record (with refund_rate, base_amount) if applicable */
-    if ($refund_amount > 0) {
-        $rStmt = $conn->prepare("
-            INSERT INTO refunds (booking_id, cust_id, amount, refund_status, refund_rate, base_amount)
-            VALUES (?, ?, ?, 'pending', ?, ?)
+    // Insert refund record if refund amount > 0
+    if ($rental_refund_amount > 0) {
+        $insertRefund = $conn->prepare("
+            INSERT INTO refunds 
+                (booking_id, cust_id, amount, refund_status, reference_code, created_at, notes, user_unread, refund_rate, base_amount)
+            VALUES (?, ?, ?, 'pending', ?, NOW(), ?, 1, ?, ?)
         ");
-        // Types: booking_id(i), cust_id(i), amount(d), refund_rate(d), base_amount(d)
-        $rStmt->bind_param("iiddd", $booking_id, $cust_id, $refund_amount, $refund_rate, $base_amount);
-        $rStmt->execute();
-        $rStmt->close();
-        logBookingAction(
-            $conn,
+        $reference_code = "RENTAL-" . $booking_id;
+        $notes = "Cancellation refund";
+        $refund_rate = $rental_refund_rate;
+        $base_amount = $rental_fee;
+        $insertRefund->bind_param(
+            "iidssdd",
             $booking_id,
-            "Booking cancelled (refund pending: RM ".number_format($refund_amount,2)." at ".($refund_rate*100)."%, base RM ".number_format($base_amount,2).")"
+            $cust_id,
+            $rental_refund_amount,
+            $reference_code,
+            $notes,
+            $refund_rate,
+            $base_amount
         );
-    } else {
-        logBookingAction(
-            $conn,
-            $booking_id,
-            "Booking cancelled (no refund; rate ".($refund_rate*100)."%)"
-        );
+        $insertRefund->execute();
+        $insertRefund->close();
     }
 
-    /* 8. Release car if no other active bookings */
+    logBookingAction(
+        $conn,
+        $booking_id,
+        "Booking cancelled; rental refund=RM ".number_format($rental_refund_amount,2)." (rate ".($rental_refund_rate*100)."%)"
+    );
+
+    // Release car if no other active bookings
     $car_id = (int)$booking['car_id'];
     $chk = $conn->prepare("
         SELECT 1
@@ -191,28 +191,30 @@ try {
         $carUpdate->bind_param("i", $car_id);
         $carUpdate->execute();
         $carUpdate->close();
-        logBookingAction($conn, $booking_id, "Car #{$car_id} released to 'available' (no active bookings).");
+        logBookingAction($conn, $booking_id, "Car #{$car_id} marked available after cancellation.");
     }
 
     $conn->commit();
 
-    /* 9. Email after commit */
-    sendCancellationEmail(
+    // Email after commit
+    sendCancellationEmailRentalOnly(
         (string)$booking['email'],
         (string)$booking['username'],
         $booking_id,
         (string)$booking['car_model'],
         (string)$booking['pickup_datetime'],
         (string)$booking['return_datetime'],
-        $refund_amount,
-        $refund_rate,
         $security_deposit,
-        $total_paid
+        $total_price,
+        $rental_refund_amount,
+        $rental_refund_rate,
+        $days_to_pickup
     );
 
-    $_SESSION['cancel_success'] = $refund_amount > 0
-        ? "Booking cancelled. Refund (RM ".number_format($refund_amount,2).") will be processed."
-        : "Booking cancelled. No refund according to the cancellation policy.";
+    $_SESSION['cancel_success'] =
+        $rental_refund_amount > 0
+            ? "Booking cancelled. Your rental fee refund (RM ".number_format($rental_refund_amount,2).") will be processed. Security deposit is non-refundable."
+            : "Booking cancelled. No refund according to policy. Security deposit is non-refundable.";
 
 } catch (Throwable $e) {
     $conn->rollback();
@@ -222,28 +224,28 @@ try {
 header("Location: bookings.php");
 exit;
 
-/* ------------- Email ------------- */
-function sendCancellationEmail(
+/* ------------- Email (Rental Fee Only) ------------- */
+function sendCancellationEmailRentalOnly(
     string $to,
     string $username,
     int $booking_id,
     string $car_model,
     string $pickup_datetime,
     string $return_datetime,
-    float $refundAmount,
+    float $depositHeld,
+    float $totalPaid,
+    float $rentalRefund,
     float $refundRate,
-    float $security_deposit,
-    float $total_paid
+    int $daysToPickup
 ): void {
     $mail = new PHPMailer\PHPMailer\PHPMailer(true);
     try {
-        // TODO: move credentials to environment variables
         $mail->isSMTP();
-        $mail->Host       = 'smtp.gmail.com';
+        $mail->Host       = 'smtp.gmail.com'; // Your SMTP server
         $mail->SMTPAuth   = true;
-        $mail->Username   = 'your_gmail@example.com';
-        $mail->Password   = 'your_app_password';
-        $mail->SMTPSecure = PHPMailer\PHPMailer\PHPMailer::ENCRYPTION_STARTTLS;
+        $mail->Username   = 'fathehaharis69@gmail.com'; // Your SMTP username
+        $mail->Password   = 'cuel ijeu lzqv vsgv';   // Your SMTP password or app password
+        $mail->SMTPSecure = 'tls';
         $mail->Port       = 587;
 
         $mail->setFrom('no-reply@timelesscarrental.com', 'TimeLess Car Rental');
@@ -255,36 +257,49 @@ function sendCancellationEmail(
         $return  = date('d M Y, H:i', strtotime($return_datetime));
         $ratePct = number_format($refundRate * 100, 0);
 
-        $policyLine = "Refund rate applied: {$ratePct}% of paid amount excluding security deposit (RM ".number_format($security_deposit,2).").";
-        $paidLine   = "Total paid: RM ".number_format($total_paid,2).".";
-        $refundLine = "Refund amount: RM ".number_format($refundAmount,2).".";
+        if ($rentalRefund > 0) {
+            $refundLine = "Refundable portion of your rental fee: <b>RM ".number_format($rentalRefund,2)."</b> (Rate: {$ratePct}%).<br><span style='color:#607080'>Cancellation made {$daysToPickup} calendar day(s) before pickup.</span>";
+            $footerLine  = "Refund will be processed by our finance team (typically within 3 - 5 business days).";
+        } else {
+            $refundLine = "According to our cancellation policy and timing, <b>no rental fee refund</b> will be issued.<br><span style='color:#607080'>Cancellation made {$daysToPickup} calendar day(s) before pickup.</span>";
+            $footerLine  = "If you believe this is an error, please contact support.";
+        }
 
         $mail->Body = "
             <p>Dear <b>".htmlspecialchars($username)."</b>,</p>
             <p>Your booking (ID: <b>{$booking_id}</b>) for <b>".htmlspecialchars($car_model)."</b> has been cancelled.</p>
-            <ul>
+            <ul style='line-height:1.4'>
                 <li><b>Pickup:</b> {$pickup}</li>
                 <li><b>Return:</b> {$return}</li>
+                <li><b>Security Deposit Held:</b> RM ".number_format($depositHeld,2)." <span style='color:#a00'>(non-refundable)</span></li>
+                <li><b>Total Paid:</b> RM ".number_format($totalPaid,2)."</li>
             </ul>
-            <p>{$policyLine}<br>{$paidLine}<br>{$refundLine}</p>
-            <p>Refunds are processed within <b>3 - 5 business days</b>.</p>
-            <br>
+            <p>{$refundLine}</p>
+            <p>{$footerLine}</p>
             <p>Thank you for using TimeLess Car Rental.</p>
-            <p>Best regards,<br>TimeLess Car Rental Team</p>
+            <p style='margin-top:24px'>Best regards,<br>TimeLess Car Rental Team</p>
         ";
 
         $mail->AltBody =
-            "Dear {$username},\n\n".
-            "Your booking (ID: {$booking_id}) for {$car_model} has been cancelled.\n".
-            "Pickup: {$pickup}\nReturn: {$return}\n\n".
-            "Refund rate applied: {$ratePct}% of paid amount excluding security deposit (RM ".number_format($security_deposit,2).").\n".
-            "Total paid: RM ".number_format($total_paid,2).".\n".
-            "Refund amount: RM ".number_format($refundAmount,2).".\n\n".
-            "Refunds are processed within 3 - 5 business days.\n\n".
-            "Thank you for using TimeLess Car Rental.\n\nBest regards,\nTimeLess Car Rental Team";
+"Dear {$username},
+
+Your booking (ID: {$booking_id}) for {$car_model} has been cancelled.
+Pickup: {$pickup}
+Return: {$return}
+Security Deposit Held: RM ".number_format($depositHeld,2)." (non-refundable)
+Total Paid: RM ".number_format($totalPaid,2)."
+
+".($rentalRefund > 0
+    ? "Refundable portion of your rental fee: RM ".number_format($rentalRefund,2)." (Rate: {$ratePct}%).\nCancellation made {$daysToPickup} calendar day(s) before pickup.\nRefund will be processed within 3 - 5 business days."
+    : "No rental fee refund will be issued under the cancellation policy.\nCancellation made {$daysToPickup} calendar day(s) before pickup.")."
+
+Thank you for using TimeLess Car Rental.
+
+Best regards,
+TimeLess Car Rental Team";
 
         $mail->send();
     } catch (Throwable $e) {
-        // Optionally log email failure
+        // Optionally log mail error
     }
 }
