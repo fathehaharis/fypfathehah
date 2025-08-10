@@ -1,4 +1,7 @@
 <?php
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
+
 include '../connect.php';
 session_start();
 
@@ -10,32 +13,34 @@ if (!isset($_SESSION['staff_id'])) {
 $staff_id = $_SESSION['staff_id'];
 
 // Handle profile update
-$success_msg = $error_msg = "";
+$success_msg_profile = $error_msg_profile = "";
+$success_msg_pwd = $error_msg_pwd = "";
 
+// Handle profile update
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_profile'])) {
     $full_name = trim($_POST['full_name']);
     $username = trim($_POST['username']);
     $status = ($_POST['status'] === 'inactive') ? 'inactive' : 'active';
 
     if ($full_name == "" || $username == "") {
-        $error_msg = "Full name and username cannot be empty.";
+        $error_msg_profile = "Full name and username cannot be empty.";
     } else {
-        // Optional: check if username is taken by someone else
+        // Check if username is taken by someone else
         $stmt = $conn->prepare("SELECT staff_id FROM delivery_staff WHERE username = ? AND staff_id != ?");
         $stmt->bind_param("si", $username, $staff_id);
         $stmt->execute();
         $stmt->store_result();
         if ($stmt->num_rows > 0) {
-            $error_msg = "Username is already taken by another user.";
+            $error_msg_profile = "Username is already taken by another user.";
         } else {
             // Update profile
             $stmt2 = $conn->prepare("UPDATE delivery_staff SET full_name = ?, username = ?, status = ? WHERE staff_id = ?");
             $stmt2->bind_param("sssi", $full_name, $username, $status, $staff_id);
             if ($stmt2->execute()) {
-                $success_msg = "Profile updated successfully.";
+                $success_msg_profile = "Profile updated successfully.";
                 $_SESSION['staff_name'] = $full_name;
             } else {
-                $error_msg = "Failed to update profile.";
+                $error_msg_profile = "Failed to update profile.";
             }
             $stmt2->close();
         }
@@ -43,37 +48,47 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_profile'])) {
     }
 }
 
-// Handle password update
+// Handle password update (with fix for double close)
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_password'])) {
     $current_password = $_POST['current_password'];
     $new_password = $_POST['new_password'];
     $confirm_password = $_POST['confirm_password'];
 
     if ($new_password != $confirm_password) {
-        $error_msg = "New passwords do not match.";
+        $error_msg_pwd = "New passwords do not match.";
     } else {
-        // Get current hash
         $stmt = $conn->prepare("SELECT password FROM delivery_staff WHERE staff_id = ?");
-        $stmt->bind_param("i", $staff_id);
-        $stmt->execute();
-        $stmt->bind_result($hash);
-        if ($stmt->fetch()) {
-            if (password_verify($current_password, $hash)) {
-                $stmt->close();
-                $new_hash = password_hash($new_password, PASSWORD_DEFAULT);
-                $stmt2 = $conn->prepare("UPDATE delivery_staff SET password = ? WHERE staff_id = ?");
-                $stmt2->bind_param("si", $new_hash, $staff_id);
-                if ($stmt2->execute()) {
-                    $success_msg = "Password updated successfully.";
+        if ($stmt) {
+            $stmt->bind_param("i", $staff_id);
+            $stmt->execute();
+            $stmt->bind_result($hash);
+            $found = $stmt->fetch();
+            $stmt->close(); // Only close ONCE
+
+            if ($found) {
+                if (password_verify($current_password, $hash)) {
+                    $new_hash = password_hash($new_password, PASSWORD_DEFAULT);
+                    $stmt2 = $conn->prepare("UPDATE delivery_staff SET password = ? WHERE staff_id = ?");
+                    if ($stmt2) {
+                        $stmt2->bind_param("si", $new_hash, $staff_id);
+                        if ($stmt2->execute()) {
+                            $success_msg_pwd = "Password updated successfully.";
+                        } else {
+                            $error_msg_pwd = "Failed to update password.";
+                        }
+                        $stmt2->close();
+                    } else {
+                        $error_msg_pwd = "Failed to prepare update statement.";
+                    }
                 } else {
-                    $error_msg = "Failed to update password.";
+                    $error_msg_pwd = "Current password is incorrect.";
                 }
-                $stmt2->close();
             } else {
-                $error_msg = "Current password is incorrect.";
+                $error_msg_pwd = "Could not fetch hash from database.";
             }
+        } else {
+            $error_msg_pwd = "Failed to prepare select statement.";
         }
-        $stmt->close();
     }
 }
 
@@ -84,6 +99,7 @@ $stmt->execute();
 $stmt->bind_result($username, $full_name, $status);
 $stmt->fetch();
 $stmt->close();
+
 include 'staff_header.php';
 ?>
 <!DOCTYPE html>
@@ -103,12 +119,24 @@ include 'staff_header.php';
             color: #2b5cbc; letter-spacing: 1px; margin-bottom: 22px;
             font-size: 1.6em; font-weight: 800;
         }
-        .form-row { margin-bottom: 20px; }
+        .form-row { margin-bottom: 20px; position:relative; }
         label { display: block; margin-bottom: 5px; color: #355a99; }
         input[type=text], input[type=password], select {
             width: 100%; padding: 9px 12px; border-radius: 7px; border: 1.5px solid #b5bee5;
             font-size: 1.05em; background: #f7fafd;
         }
+        .eye-icon {
+            position: absolute;
+            right: 14px;
+            top: 38px;
+            width: 22px;
+            height: 22px;
+            cursor: pointer;
+            color: #b5bee5;
+            transition: color .17s;
+            z-index: 3;
+        }
+        .eye-icon:hover { color: #2b5cbc; }
         button {
             padding: 10px 27px;
             background: #2b5cbc; color: #fff; border: none; border-radius: 7px;
@@ -128,11 +156,11 @@ include 'staff_header.php';
 <body>
 <div class="profile-container">
     <h2>My Profile</h2>
-    <?php if ($success_msg): ?>
-        <div class="msg-success"><?= htmlspecialchars($success_msg) ?></div>
-    <?php endif; ?>
-    <?php if ($error_msg): ?>
-        <div class="msg-error"><?= htmlspecialchars($error_msg) ?></div>
+    <!-- Profile update messages -->
+    <?php if ($success_msg_profile): ?>
+        <div class="msg-success"><?= htmlspecialchars($success_msg_profile) ?></div>
+    <?php elseif ($error_msg_profile): ?>
+        <div class="msg-error"><?= htmlspecialchars($error_msg_profile) ?></div>
     <?php endif; ?>
 
     <form method="post" autocomplete="off">
@@ -157,22 +185,63 @@ include 'staff_header.php';
 
     <hr>
 
+    <!-- Password update messages -->
+    <?php if ($success_msg_pwd): ?>
+        <div class="msg-success"><?= htmlspecialchars($success_msg_pwd) ?></div>
+    <?php elseif ($error_msg_pwd): ?>
+        <div class="msg-error"><?= htmlspecialchars($error_msg_pwd) ?></div>
+    <?php endif; ?>
+
     <form method="post" autocomplete="off">
         <div class="section-title">Change Password</div>
         <div class="form-row">
             <label for="current_password">Current Password</label>
-            <input type="password" name="current_password" required minlength="6">
+            <input type="password" id="current_password" name="current_password" required minlength="6" autocomplete="current-password">
+            <span class="eye-icon" onclick="togglePassword('current_password', this)">
+                <!-- Eye SVG -->
+                <svg viewBox="0 0 24 24" fill="none">
+                  <path d="M1.5 12C3.5 6.5 8 3.5 12 3.5C16 3.5 20.5 6.5 22.5 12C20.5 17.5 16 20.5 12 20.5C8 20.5 3.5 17.5 1.5 12Z" stroke="currentColor" stroke-width="1.5"/>
+                  <circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="1.5"/>
+                  <circle cx="12" cy="12" r="2" fill="currentColor"/>
+                </svg>
+            </span>
         </div>
         <div class="form-row">
             <label for="new_password">New Password</label>
-            <input type="password" name="new_password" required minlength="6">
+            <input type="password" id="new_password" name="new_password" required minlength="6" autocomplete="new-password">
+            <span class="eye-icon" onclick="togglePassword('new_password', this)">
+                <svg viewBox="0 0 24 24" fill="none">
+                  <path d="M1.5 12C3.5 6.5 8 3.5 12 3.5C16 3.5 20.5 6.5 22.5 12C20.5 17.5 16 20.5 12 20.5C8 20.5 3.5 17.5 1.5 12Z" stroke="currentColor" stroke-width="1.5"/>
+                  <circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="1.5"/>
+                  <circle cx="12" cy="12" r="2" fill="currentColor"/>
+                </svg>
+            </span>
         </div>
         <div class="form-row">
             <label for="confirm_password">Confirm New Password</label>
-            <input type="password" name="confirm_password" required minlength="6">
+            <input type="password" id="confirm_password" name="confirm_password" required minlength="6" autocomplete="new-password">
+            <span class="eye-icon" onclick="togglePassword('confirm_password', this)">
+                <svg viewBox="0 0 24 24" fill="none">
+                  <path d="M1.5 12C3.5 6.5 8 3.5 12 3.5C16 3.5 20.5 6.5 22.5 12C20.5 17.5 16 20.5 12 20.5C8 20.5 3.5 17.5 1.5 12Z" stroke="currentColor" stroke-width="1.5"/>
+                  <circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="1.5"/>
+                  <circle cx="12" cy="12" r="2" fill="currentColor"/>
+                </svg>
+            </span>
         </div>
         <button type="submit" name="update_password">Update Password</button>
     </form>
 </div>
+<script>
+function togglePassword(inputId, iconSpan) {
+    const input = document.getElementById(inputId);
+    if (input.type === "password") {
+        input.type = "text";
+        iconSpan.style.color = "#2b5cbc";
+    } else {
+        input.type = "password";
+        iconSpan.style.color = "#b5bee5";
+    }
+}
+</script>
 </body>
 </html>

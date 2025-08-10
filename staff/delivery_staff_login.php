@@ -7,7 +7,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $password = $_POST['password'] ?? '';
     $remember = isset($_POST['remember']);
 
-    // Only allow login with username (not email) for delivery staff
     $stmt = $conn->prepare("SELECT * FROM delivery_staff WHERE username = ?");
     $stmt->bind_param("s", $username);
     $stmt->execute();
@@ -17,13 +16,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($staff['status'] !== 'active') {
             $_SESSION['login_errors'][] = "Your account is not active. Please contact admin.";
         } else {
+            session_regenerate_id(true);
             $_SESSION['staff_id'] = $staff['staff_id'];
             $_SESSION['staff_username'] = $staff['username'];
             $_SESSION['staff_name'] = $staff['full_name'];
 
             // Handle Remember Me (30 days)
             if ($remember) {
-                setcookie('staff_login', $staff['staff_id'], time() + (86400 * 30), "/"); // 30 days
+                setcookie('staff_login', $staff['staff_id'], time() + (86400 * 30), "/");
             } else {
                 setcookie('staff_login', '', time() - 3600, "/");
             }
