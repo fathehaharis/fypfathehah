@@ -46,7 +46,7 @@ unset($_SESSION['suggested_username']);
 }
 .inline-check.valid {
   color: #2bbf5f;
-  display: none; /* Hide the positive message */
+  display: none;
 }
 .password-toggle {
   position: relative;
@@ -75,7 +75,6 @@ unset($_SESSION['suggested_username']);
   color: #e54848;
   display: none;
   padding-left: 2px;
-  /* Place message below input, not inline */
   position: static;
 }
 </style>
@@ -116,17 +115,26 @@ document.addEventListener("DOMContentLoaded", function() {
     });
   });
 
-  // Email check
+  // Email format and check
   const emailInput = document.getElementById('email');
   const emailCheck = document.createElement('div');
   emailCheck.className = "inline-check";
   emailInput.parentNode.insertBefore(emailCheck, emailInput.nextSibling);
+
+  function validateEmailFormat(email) {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+  }
 
   emailInput.addEventListener('input', function() {
     const value = emailInput.value.trim();
     if (!value) {
       emailCheck.textContent = '';
       emailCheck.className = "inline-check";
+      return;
+    }
+    if (!validateEmailFormat(value)) {
+      emailCheck.textContent = "Invalid email format.";
+      emailCheck.className = "inline-check invalid";
       return;
     }
     checkExist('email', value, function(exists) {
@@ -138,6 +146,35 @@ document.addEventListener("DOMContentLoaded", function() {
         emailCheck.className = "inline-check";
       }
     });
+  });
+
+  // Malaysian phone number format (10 or 11 digits, starts with 01)
+  const phoneInput = document.getElementById('phone_no');
+  const phoneCheck = document.createElement('div');
+  phoneCheck.className = "inline-check";
+  phoneInput.parentNode.insertBefore(phoneCheck, phoneInput.nextSibling);
+
+  function validatePhoneFormat(phone) {
+    phone = phone.replace(/[\s\-]/g, '');
+    return /^01\d{8,9}$/.test(phone) && phone.length >= 10 && phone.length <= 11;
+  }
+
+  phoneInput.addEventListener('input', function() {
+    let value = phoneInput.value.replace(/[^0-9\-]/g, ''); // Remove unwanted chars
+    if (value.length > 11) value = value.slice(0, 11); // Enforce max 11 chars
+    phoneInput.value = value;
+    if (!value) {
+      phoneCheck.textContent = '';
+      phoneCheck.className = "inline-check";
+      return;
+    }
+    if (!validatePhoneFormat(value)) {
+      phoneCheck.textContent = "Invalid phone number format. Only 10 or 11 digits starting with 01. Example: 0123456789";
+      phoneCheck.className = "inline-check invalid";
+    } else {
+      phoneCheck.textContent = "";
+      phoneCheck.className = "inline-check";
+    }
   });
 
   // Password show/hide toggle
@@ -160,7 +197,6 @@ document.addEventListener("DOMContentLoaded", function() {
   const confirmPasswordInput = document.getElementById('confirm_password');
   const matchMessage = document.createElement('div');
   matchMessage.id = "password-match-message";
-  // Insert after the confirm password input's parent (for below effect)
   const confirmParent = confirmPasswordInput.parentNode;
   if (confirmParent.classList.contains('password-toggle')) {
     confirmParent.parentNode.insertBefore(matchMessage, confirmParent.nextSibling);
@@ -169,7 +205,6 @@ document.addEventListener("DOMContentLoaded", function() {
   }
 
   function checkMatch() {
-    // Only show message if confirmPasswordInput has a value
     if (!confirmPasswordInput.value) {
       matchMessage.style.display = "none";
       return;
@@ -204,14 +239,18 @@ document.addEventListener("DOMContentLoaded", function() {
       <div class="suggested-username">
         Try this username: <strong><?= htmlspecialchars($suggested_username) ?></strong>
       </div>
-  <?php endif; ?>
+    <?php endif; ?>
     <form action="registerprocess.php" method="post" class="register-form" enctype="multipart/form-data" autocomplete="off">
       <label for="email">Email</label>
-      <input type="email" id="email" name="email" required>
+      <input type="email" id="email" name="email" required pattern="^[^\s@]+@[^\s@]+\.[^\s@]+$" title="Please enter a valid email address">
       <label for="username">Username</label>
       <input type="text" id="username" name="username" required>
       <label for="phone_no">Phone Number</label>
-      <input type="text" id="phone_no" name="phone_no" required>
+      <input type="text" id="phone_no" name="phone_no"
+        required
+        pattern="^01\d{8,9}$"
+        maxlength="11"
+        title="Format: Only 10 or 11 digits starting with 01. Example: 0123456789 or 01112345678">
       <label for="password">Password</label>
       <div class="password-toggle">
         <input type="password" id="password" name="password" required autocomplete="new-password">
@@ -237,8 +276,6 @@ document.addEventListener("DOMContentLoaded", function() {
         </button>
       </div>
       <!-- The password-match-message will be inserted below the confirm password box by JS -->
-      <label for="age">Age</label>
-      <input type="number" id="age" name="age" min="18">
       <button type="submit" class="register-btn">Register</button>
     </form>
     <div class="login-link">

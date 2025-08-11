@@ -12,8 +12,7 @@ if (empty($_SESSION['booking_data'])) {
 }
 
 include '../connect.php';
-require '../includes/profile_guard.php';
-requireVerifiedProfile($conn, (int)$_SESSION['cust_id']);
+
 
 $cust_id  = (int)$_SESSION['cust_id'];
 $booking  = $_SESSION['booking_data']; // car_id, pickup_datetime, return_datetime, etc.

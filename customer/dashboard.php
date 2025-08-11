@@ -278,11 +278,7 @@ $carResult = $conn->query($carSql);
     display: inline-block;
 }
 .book-btn:hover { background: #234c96; }
-.book-btn.disabled {
-    background: #9aa9c9;
-    cursor: not-allowed;
-    pointer-events: none;
-}
+/* Remove disabled style since all are now enabled */
 .no-cars {
     text-align: center;
     margin-top: 80px;
@@ -405,7 +401,6 @@ function dismissProfileNotice() {
             ? "get_car_image.php?car_image_id=".(int)$car['car_image_id']."&v=".(int)$car['images_version']
             : "/assets/images/viva_elite.png";
         $alt = $car['car_brand'].' '.$car['car_model'];
-        $canBook = $completionPercent === 100; // Gate booking optionally
     ?>
         <div class="car-card">
             <img class="car-img"
@@ -414,10 +409,9 @@ function dismissProfileNotice() {
                  onerror="this.src='/assets/images/viva_elite.png'">
             <div class="car-title"><?= htmlspecialchars($alt) ?></div>
             <div class="car-rate">RM <?= number_format((float)$car['daily_rate'], 2) ?> / day</div>
-            <a class="book-btn<?= $canBook ? '' : ' disabled' ?>"
-               href="<?= $canBook ? 'book_car.php?car_id='.(int)$car['car_id'] : '#' ?>"
-               <?= $canBook ? '' : 'aria-disabled="true"' ?>>
-               <?= $canBook ? 'Book Now' : 'Complete Profile First' ?>
+            <a class="book-btn"
+               href="book_car.php?car_id=<?= (int)$car['car_id'] ?>">
+               Book Now
             </a>
         </div>
     <?php endwhile; ?>

@@ -332,13 +332,6 @@ if (session_status() === PHP_SESSION_NONE) {
           <a href="/customer/profile.php">Profile</a>
           <a href="/customer/bookings.php">My Bookings</a>
           <a href="/customer/dashboard.php">Dashboard</a>
-          <!-- ADDED: Refunds link with optional badge -->
-          <a href="/customer/my_refunds.php">
-            Refunds
-            <?php if (!empty($refund_count)): ?>
-              <span class="menu-badge"><?= $refund_count ?></span>
-            <?php endif; ?>
-          </a>
           <!-- END ADDED -->
           <a href="/customer/logout.php" class="logout-link">Logout</a>
         </div>

@@ -15,7 +15,9 @@
  *         security_deposit_refund > 0
  *         no existing deposit refund row
  *  5. Process deposit refund row (sets refunds.refund_status='processed' AND booking.deposit_status='refunded')
+ *     - Sends SMTP email to customer upon processing.
  *  6. Process rental refund row (refunds.refund_status='pending' AND reference_code = RENTAL-{booking_id}, sets to 'processed')
+ *     - Sends SMTP email to customer upon processing.
  *
  * Highlighting:
  *  - Row class highlight-create: deposit_status pending_refund AND no refund row yet
@@ -35,6 +37,60 @@ date_default_timezone_set('Asia/Kuala_Lumpur');
 if (empty($_SESSION['admin_id'])) {
     header('Location: admin_login.php');
     exit;
+}
+
+/* ---------- SMTP (PHPMailer) helper ---------- */
+require_once __DIR__ . '/../vendor/autoload.php';
+use PHPMailer\PHPMailer\PHPMailer;
+use PHPMailer\PHPMailer\Exception;
+
+/**
+ * Send an email via SMTP (PHPMailer).
+ * Configure with environment variables:
+ *   SMTP_HOST, SMTP_PORT, SMTP_SECURE (tls|ssl|''), SMTP_USERNAME, SMTP_PASSWORD,
+ *   SMTP_FROM_EMAIL, SMTP_FROM_NAME, SMTP_REPLY_TO, SMTP_REPLY_TO_NAME
+ * For Gmail, set FROM to the same address as SMTP_USERNAME and use an App Password.
+ */
+function send_mail_smtp(string $toEmail, string $toName, string $subject, string $html, string $altText = ''): array {
+    $host     = getenv('SMTP_HOST') ?: 'smtp.gmail.com';
+    $port     = (int)(getenv('SMTP_PORT') ?: 587);
+    $secure   = getenv('SMTP_SECURE') ?: 'tls';
+    $username = getenv('SMTP_USERNAME') ?: 'fathehaharis69@gmail.com';
+    $password = getenv('SMTP_PASSWORD') ?: 'cuel ijeu lzqv vsgv';
+    $fromEmail= getenv('SMTP_FROM_EMAIL') ?: $username; // Gmail requires from == username
+    $fromName = getenv('SMTP_FROM_NAME') ?: 'TimeLess Car Rental';
+    $replyTo  = getenv('SMTP_REPLY_TO') ?: $fromEmail;
+    $replyNm  = getenv('SMTP_REPLY_TO_NAME') ?: $fromName;
+
+    if (!class_exists(PHPMailer::class)) {
+        return [false, 'PHPMailer not installed. Run: composer require phpmailer/phpmailer'];
+    }
+
+    try {
+        $mail = new PHPMailer(true);
+        $mail->isSMTP();
+        $mail->Host       = $host;
+        $mail->SMTPAuth   = true;
+        $mail->Username   = $username;
+        $mail->Password   = $password;
+        if ($secure) $mail->SMTPSecure = $secure; // tls or ssl
+        $mail->Port       = $port;
+        $mail->CharSet    = 'UTF-8';
+
+        $mail->setFrom($fromEmail, $fromName);
+        $mail->addReplyTo($replyTo, $replyNm);
+        $mail->addAddress($toEmail, $toName);
+
+        $mail->isHTML(true);
+        $mail->Subject = $subject;
+        $mail->Body    = $html;
+        $mail->AltBody = $altText !== '' ? $altText : strip_tags(str_replace(['<br>','<br/>','<br />'], "\n", $html));
+
+        $mail->send();
+        return [true, ''];
+    } catch (Throwable $e) {
+        return [false, $e->getMessage()];
+    }
 }
 
 /* ---------- CSRF Token ---------- */
@@ -98,7 +154,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                 // Deposit refund row
                 $rx = $conn->prepare("
-                    SELECT refund_id, refund_status, amount
+                    SELECT refund_id, refund_status, amount, notes, created_at, processed_at
                       FROM refunds
                      WHERE booking_id=? AND reference_code=? LIMIT 1
                 ");
@@ -109,7 +165,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                 // Rental refund row
                 $rrx = $conn->prepare("
-                    SELECT refund_id, refund_status, amount
+                    SELECT refund_id, refund_status, amount, notes, created_at, processed_at
                       FROM refunds
                      WHERE booking_id=? AND reference_code=? LIMIT 1
                 ");
@@ -175,7 +231,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             $u1 = $conn->prepare("
                                 UPDATE refunds
                                    SET refund_status='processed',
-                                       processed_at=NOW()
+                                       processed_at=NOW(),
+                                       user_unread=1
                                  WHERE refund_id=? LIMIT 1
                             ");
                             $u1->bind_param('i', $refund_id);
@@ -194,7 +251,39 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             $u2->close();
 
                             $conn->commit();
-                            $flash = 'Deposit refund processed.';
+
+                            // Email the customer (post-commit)
+                            $custEmail = '';
+                            $custName  = 'Customer';
+                            $cst = $conn->prepare("SELECT email, full_name FROM customer WHERE cust_id=? LIMIT 1");
+                            $cst->bind_param('i', $bk['cust_id']);
+                            $cst->execute();
+                            $cst->bind_result($custEmail, $custName);
+                            $cst->fetch();
+                            $cst->close();
+
+                            $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') ? 'https' : 'http';
+                            $host   = $_SERVER['HTTP_HOST'] ?? 'localhost';
+                            $refUrl = $scheme.'://'.$host.'/customer/my_refunds.php';
+
+                            $amountStr = nf($depositRefundRow['amount']);
+                            $subject = "Deposit Refund Processed – Booking #{$booking_id}";
+                            $html = "
+                                <div style='font-family:Arial,sans-serif;font-size:14px;color:#222'>
+                                  <p>Hi ".e($custName).",</p>
+                                  <p>Your deposit refund for booking <strong>#{$booking_id}</strong> has been <strong>processed</strong>.</p>
+                                  <p>
+                                    <strong>Reference:</strong> ".e($depRefCode)."<br>
+                                    <strong>Amount:</strong> RM ".e($amountStr)."
+                                  </p>
+                                  <p style='color:#555'>Thank you for choosing TimeLess Car Rental.</p>
+                                </div>
+                            ";
+                            $mailOk = true; $mailErr = '';
+                            if ($custEmail) {
+                                [$mailOk, $mailErr] = send_mail_smtp($custEmail, $custName ?: 'Customer', $subject, $html);
+                            }
+                            $flash = 'Deposit refund processed.' . ($mailOk ? ' Email sent.' : (' Email not sent: '.$mailErr));
                         } catch (Throwable $ex) {
                             $conn->rollback();
                             $error = 'Failed to process deposit refund: '.$ex->getMessage();
@@ -215,17 +304,52 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             $u1 = $conn->prepare("
                                 UPDATE refunds
                                    SET refund_status='processed',
-                                       processed_at=NOW()
+                                       processed_at=NOW(),
+                                       user_unread=1
                                  WHERE refund_id=? LIMIT 1
                             ");
                             $u1->bind_param('i', $refund_id);
                             $u1->execute();
                             $u1->close();
 
-                            // Optionally: mark booking as "rental_refunded" or add a log, if desired
+                            // Optionally: mark booking as "rental_refunded" or add a log.
 
                             $conn->commit();
-                            $flash = 'Rental refund processed.';
+
+                            // Email the customer (post-commit)
+                            $custEmail = '';
+                            $custName  = 'Customer';
+                            $cst = $conn->prepare("SELECT email, full_name FROM customer WHERE cust_id=? LIMIT 1");
+                            $cst->bind_param('i', $bk['cust_id']);
+                            $cst->execute();
+                            $cst->bind_result($custEmail, $custName);
+                            $cst->fetch();
+                            $cst->close();
+
+                            $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') ? 'https' : 'http';
+                            $host   = $_SERVER['HTTP_HOST'] ?? 'localhost';
+                            $refUrl = $scheme.'://'.$host.'/customer/my_refunds.php';
+
+                            $amountStr = nf($rentalRefundRow['amount']);
+                            $subject = "Rental Refund Processed – Booking #{$booking_id}";
+                            $html = "
+                                <div style='font-family:Arial,sans-serif;font-size:14px;color:#222'>
+                                  <p>Hi ".e($custName).",</p>
+                                  <p>Your rental refund for booking <strong>#{$booking_id}</strong> has been <strong>processed</strong>.</p>
+                                  <p>
+                                    <strong>Reference:</strong> ".e($rentRefCode)."<br>
+                                    <strong>Amount:</strong> RM ".e($amountStr)."
+                                  </p>
+                                  <p>You can view the refund details here:</p>
+                                  <p><a href='".e($refUrl)."' style='color:#1a54b3' target='_blank'>My Refunds</a></p>
+                                  <p style='color:#555'>Thank you for choosing TimeLess Car Rental.</p>
+                                </div>
+                            ";
+                            $mailOk = true; $mailErr = '';
+                            if ($custEmail) {
+                                [$mailOk, $mailErr] = send_mail_smtp($custEmail, $custName ?: 'Customer', $subject, $html);
+                            }
+                            $flash = 'Rental refund processed.' . ($mailOk ? ' Email sent.' : (' Email not sent: '.$mailErr));
                         } catch (Throwable $ex) {
                             $conn->rollback();
                             $error = 'Failed to process rental refund: '.$ex->getMessage();

@@ -34,8 +34,7 @@ function formatDeliveryType(string $t): string {
 }
 
 include '../connect.php';
-require '../includes/profile_guard.php';
-requireVerifiedProfile($conn, (int)$_SESSION['cust_id']);
+
 
 $cust_id = (int)$_SESSION['cust_id'];
 

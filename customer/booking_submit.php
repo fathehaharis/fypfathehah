@@ -53,8 +53,7 @@ if (!preg_match('/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:00$/', $pickup_datetime)
 }
 
 include '../connect.php';
-require '../includes/profile_guard.php';
-requireVerifiedProfile($conn, $cust_id);
+
 
 /* Fetch car (with status for availability) */
 if ($car_id <= 0) die("Invalid car id.");

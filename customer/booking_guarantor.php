@@ -8,6 +8,7 @@ if (!isset($_SESSION['cust_id'])) {
 
 include '../connect.php';
 
+
 if (empty($_SESSION['booking_data'])) {
     header("Location: book_car.php");
     exit;
@@ -352,16 +353,6 @@ document.addEventListener('DOMContentLoaded', function(){
             <label class="form-label">ID Front Image<span class="required-star">*</span></label>
             <div class="preview-section">
                 <div class="preview-box">
-                    <div class="preview-title">Stored <span class="badge">CURRENT</span></div>
-                    <?php if (!empty($_SESSION['guarantor_data']['guarantor_id_front']) && file_exists($_SESSION['guarantor_data']['guarantor_id_front'])): ?>
-                        <img class="img-preview" alt="Current Front"
-                             src="data:image/jpeg;base64,<?= base64_encode(file_get_contents($_SESSION['guarantor_data']['guarantor_id_front'])) ?>">
-                        <div class="note">Upload new to replace.</div>
-                    <?php else: ?>
-                        <div class="note">None yet.</div>
-                    <?php endif; ?>
-                </div>
-                <div class="preview-box">
                     <div class="preview-title">Live Preview <span class="badge badge-new">NEW</span></div>
                     <img id="live_front" class="img-preview" style="display:none;" alt="Live Front Preview">
                 </div>
@@ -373,16 +364,6 @@ document.addEventListener('DOMContentLoaded', function(){
         <div class="form-row">
             <label class="form-label">ID Back Image<span class="required-star">*</span></label>
             <div class="preview-section">
-                <div class="preview-box">
-                    <div class="preview-title">Stored <span class="badge">CURRENT</span></div>
-                    <?php if (!empty($_SESSION['guarantor_data']['guarantor_id_back']) && file_exists($_SESSION['guarantor_data']['guarantor_id_back'])): ?>
-                        <img class="img-preview" alt="Current Back"
-                             src="data:image/jpeg;base64,<?= base64_encode(file_get_contents($_SESSION['guarantor_data']['guarantor_id_back'])) ?>">
-                        <div class="note">Upload new to replace.</div>
-                    <?php else: ?>
-                        <div class="note">None yet.</div>
-                    <?php endif; ?>
-                </div>
                 <div class="preview-box">
                     <div class="preview-title">Live Preview <span class="badge badge-new">NEW</span></div>
                     <img id="live_back" class="img-preview" style="display:none;" alt="Live Back Preview">

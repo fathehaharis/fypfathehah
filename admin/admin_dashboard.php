@@ -32,12 +32,12 @@ $stmt = $conn->prepare("SELECT COALESCE(NULLIF(full_name,''), username) AS displ
 $stmt->bind_param("i", $admin_id);
 $stmt->execute(); $stmt->bind_result($admin_name); $stmt->fetch(); $stmt->close();
 
-$nowDT          = new DateTime('now');
+$nowDT             = new DateTime('now');
 $threeHoursLaterDT = (clone $nowDT)->modify('+3 hour');
-$todayDate      = $nowDT->format('Y-m-d');
-$nowStr         = $nowDT->format('Y-m-d H:i:s');
-$threeHoursLaterStr = $threeHoursLaterDT->format('Y-m-d H:i:s');
-$tomorrowDate   = (clone $nowDT)->modify('+1 day')->format('Y-m-d');
+$todayDate         = $nowDT->format('Y-m-d');
+$nowStr            = $nowDT->format('Y-m-d H:i:s');
+$threeHoursLaterStr= $threeHoursLaterDT->format('Y-m-d H:i:s');
+$tomorrowDate      = (clone $nowDT)->modify('+1 day')->format('Y-m-d');
 
 /* -------------------- Core Dashboard Counts -------------------- */
 $total_customers = fetchScalar($conn, "SELECT COUNT(*) FROM customer");
@@ -59,24 +59,22 @@ $return_today = fetchScalar(
 );
 
 /* -------------------- Alerts/Notifications -------------------- */
-// 1. Approve Customer Profile (uses profile_status per your DDL)
-$profile_approval_alerts = fetchRows(
+// 1. Bookings that need admin approval: status = 'pending'
+$approval_pending_count = fetchScalar(
     $conn,
-    "SELECT cust_id, username, full_name FROM customer WHERE profile_status IN ('pending', 'pending_reverification') ORDER BY cust_id ASC"
+    "SELECT COUNT(*) FROM booking WHERE status = 'pending'"
 );
-
-// 2. Approve Booking
 $approval_alerts = fetchRows(
     $conn,
-    "SELECT b.booking_id, c.car_brand, c.car_model, c.plate_no, cust.full_name, b.created_at
+    "SELECT b.booking_id, c.car_brand, c.car_model, c.plate_no, cust.full_name, b.created_at, b.status
        FROM booking b
        JOIN car c ON b.car_id = c.car_id
   LEFT JOIN customer cust ON b.cust_id = cust.cust_id
-      WHERE b.status = 'waiting_verification'
+      WHERE b.status = 'pending'
    ORDER BY b.created_at ASC"
 );
 
-// 3. Inspection few hours before pickup
+// 2. Inspection few hours before pickup
 $inspection_alerts = fetchRows(
     $conn,
     "SELECT b.booking_id, b.pickup_datetime, c.car_brand, c.car_model, c.plate_no,
@@ -93,7 +91,7 @@ $inspection_alerts = fetchRows(
     [$nowStr, $threeHoursLaterStr]
 );
 
-// 4. Assign service to delivery staff one day before pickup
+// 3. Assign service to delivery staff one day before pickup
 $service_assign_alerts = fetchRows(
     $conn,
     "SELECT s.service_id, s.service_type, s.staff_id, b.booking_id, b.pickup_datetime,
@@ -110,7 +108,7 @@ $service_assign_alerts = fetchRows(
     [$tomorrowDate]
 );
 
-// 5. Refund alerts
+// 4. Refund alerts
 $refund_alerts = fetchRows(
     $conn,
     "SELECT r.refund_id, r.booking_id, r.amount, r.created_at, cust.full_name,
@@ -173,11 +171,16 @@ include 'admin_header.php';
   font-weight:600; text-decoration:none; font-size:0.95em; margin-left:14px;
 }
 .alert-box a.action-btn:hover { background:#b32d2d; }
-.alert-box.alert-profile {background:#e8eaff;color:#2347b6;border:1.5px solid #b6c9fa;}
-.alert-box.alert-profile .profile-user {font-weight:700;color:#2347b6;}
 .alert-box.alert-inspection {background:#fffbe7;color:#bfa800;}
 .alert-box.alert-service {background:#e8f6fd;color:#1678b7;}
 .alert-box.alert-service .service-type {font-weight:700;color:#1678b7;}
+.count-badge {
+  display:inline-block; margin-left:10px; padding:2px 8px; border-radius:999px;
+  font-size:.85em; font-weight:800; color:#fff; background:#e54848;
+}
+.status-chip {
+  display:inline-block; padding:2px 8px; border-radius:999px; font-size:.78em; font-weight:700; color:#8a2a2a; background:#ffd2d2; margin-left:8px;
+}
 @media (max-width:900px){
   .admin-layout { flex-direction:column; }
   .admin-sidebar { flex-direction:row; width:100%; min-height:unset; padding:0; overflow-x:auto; }
@@ -206,28 +209,16 @@ include 'admin_header.php';
       <span class="welcome-admin">👋 Welcome<?= $admin_name ? ', ' . htmlspecialchars($admin_name) : '' ?>!</span>
     </div>
 
-    <?php if (!empty($profile_approval_alerts)): ?>
-      <div class="alert-box alert-profile">
-        <strong>Action Required:</strong> Customers awaiting profile approval:
-        <ul>
-          <?php foreach ($profile_approval_alerts as $cust): ?>
-            <li>
-              <span class="profile-user"><?= htmlspecialchars($cust['full_name'] ?: $cust['username']) ?></span>
-              <a class="action-btn" href="customers.php?id=<?= (int)$cust['cust_id'] ?>">Approve</a>
-            </li>
-          <?php endforeach; ?>
-        </ul>
-      </div>
-    <?php endif; ?>
-
     <?php if (!empty($approval_alerts)): ?>
       <div class="alert-box alert-danger">
-        <strong>Action Required:</strong> Bookings awaiting approval:
+        <strong>Action Required:</strong> Bookings pending admin approval
+        <span class="count-badge"><?= (int)$approval_pending_count ?></span>
         <ul>
           <?php foreach ($approval_alerts as $a): ?>
             <li>
               <strong><?= htmlspecialchars($a['car_brand']) ?> <?= htmlspecialchars($a['car_model']) ?> (<?= htmlspecialchars($a['plate_no']) ?>)</strong>
-              – Booking #<?= (int)$a['booking_id'] ?> (Customer: <?= htmlspecialchars($a['full_name']) ?>)
+              – Booking #<?= (int)$a['booking_id'] ?> (Customer: <?= htmlspecialchars($a['full_name'] ?: 'Unknown') ?>)
+              <span class="status-chip"><?= htmlspecialchars(str_replace('_',' ', $a['status'])) ?></span>
               <a class="action-btn" href="booking_details.php?id=<?= (int)$a['booking_id'] ?>">Review</a>
             </li>
           <?php endforeach; ?>

@@ -26,7 +26,6 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
     $email = trim($_POST['email'] ?? '');
     $password = $_POST['password'] ?? '';
     $confirm_password = $_POST['confirm_password'] ?? '';
-    $age = trim($_POST['age'] ?? '');
 
     $errors = [];
     $suggested_username = "";
@@ -35,14 +34,18 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
     if (!$username || !$phone_no || !$email || !$password || !$confirm_password) {
         $errors[] = "All fields are required.";
     }
+    // Email format validation
     if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
         $errors[] = "Invalid email format.";
     }
+    // Malaysian phone number format validation (only 10 or 11 digits, starts with 01)
+    $phone_sanitized = str_replace(['-', ' '], '', $phone_no);
+    if (!preg_match('/^01\d{8,9}$/', $phone_sanitized) || strlen($phone_sanitized) < 10 || strlen($phone_sanitized) > 11) {
+        $errors[] = "Invalid Malaysian phone number. Must be only 10 or 11 digits, starting with 01. Example: 0123456789";
+    }
+    // Password match
     if ($password !== $confirm_password) {
         $errors[] = "Passwords do not match.";
-    }
-    if ($age && $age < 18) {
-        $errors[] = "You must be at least 18 years old.";
     }
 
     // Password policy enforcement
@@ -97,8 +100,8 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
     // Insert new customer if no errors
     if (empty($errors)) {
         $hashed_password = password_hash($password, PASSWORD_DEFAULT);
-        $stmt = $conn->prepare("INSERT INTO customer (username, phone_no, email, password, age) VALUES (?, ?, ?, ?, ?)");
-        $stmt->bind_param("ssssi", $username, $phone_no, $email, $hashed_password, $age);
+        $stmt = $conn->prepare("INSERT INTO customer (username, phone_no, email, password) VALUES (?, ?, ?, ?)");
+        $stmt->bind_param("ssss", $username, $phone_no, $email, $hashed_password);
         if ($stmt->execute()) {
             $_SESSION['success_message'] = "Registration successful! Please log in.";
             header("Location: dashboard.php");

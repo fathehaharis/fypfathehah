@@ -8,8 +8,7 @@ declare(strict_types=1);
  *  - Back button links to bookings.php
  *  - Unified modal gallery (inspection + ID/license/guarantor)
  *  - Agreement Download button (ALWAYS visible section with clear status)
- *
- * This version ensures the "Download Agreement" (or status) always appears.
+ *  - SMTP email to customer on APPROVE/REJECT (includes reason on reject)
  */
 
 ini_set('display_errors', 1); // Disable in production
@@ -25,6 +24,68 @@ if (empty($_SESSION['admin_id'])) {
     exit;
 }
 
+/* ================= SMTP (PHPMailer) helper ================= */
+require_once __DIR__ . '/../vendor/autoload.php';
+use PHPMailer\PHPMailer\PHPMailer;
+use PHPMailer\PHPMailer\Exception;
+
+/**
+ * Send email via SMTP (PHPMailer).
+ * Configure via environment variables (recommended):
+ *   SMTP_HOST, SMTP_PORT, SMTP_SECURE (tls|ssl|''), SMTP_USERNAME, SMTP_PASSWORD,
+ *   SMTP_FROM_EMAIL, SMTP_FROM_NAME, SMTP_REPLY_TO, SMTP_REPLY_TO_NAME
+ *
+ * For Gmail:
+ * - SMTP_HOST=smtp.gmail.com
+ * - SMTP_PORT=587
+ * - SMTP_SECURE=tls
+ * - SMTP_USERNAME=your_gmail@gmail.com
+ * - SMTP_PASSWORD=your_app_password (not your login password)
+ * - SMTP_FROM_EMAIL=your_gmail@gmail.com (Gmail requires From to match authenticated user)
+ */
+function send_mail_smtp(string $toEmail, string $toName, string $subject, string $html, string $altText = ''): array {
+    $host     = getenv('SMTP_HOST') ?: 'smtp.gmail.com';
+    $port     = (int)(getenv('SMTP_PORT') ?: 587);
+    $secure   = getenv('SMTP_SECURE') ?: 'tls';
+    $username = getenv('SMTP_USERNAME') ?: 'fathehaharis69@gmail.com';
+    $password = getenv('SMTP_PASSWORD') ?: 'cuel ijeu lzqv vsgv';
+    $fromEmail= getenv('SMTP_FROM_EMAIL') ?: $username; // Gmail requires from == username
+    $fromName = getenv('SMTP_FROM_NAME') ?: 'TimeLess Car Rental';
+    $replyTo  = getenv('SMTP_REPLY_TO') ?: $fromEmail;
+    $replyNm  = getenv('SMTP_REPLY_TO_NAME') ?: $fromName;
+
+    if (!class_exists(PHPMailer::class)) {
+        return [false, 'PHPMailer not installed. Run: composer require phpmailer/phpmailer'];
+    }
+
+    try {
+        $mail = new PHPMailer(true);
+        $mail->isSMTP();
+        $mail->Host       = $host;
+        $mail->SMTPAuth   = true;
+        $mail->Username   = $username;
+        $mail->Password   = $password;
+        if ($secure) $mail->SMTPSecure = $secure; // tls or ssl
+        $mail->Port       = $port;
+        $mail->CharSet    = 'UTF-8';
+
+        $mail->setFrom($fromEmail, $fromName);
+        $mail->addReplyTo($replyTo, $replyNm);
+        $mail->addAddress($toEmail, $toName);
+
+        $mail->isHTML(true);
+        $mail->Subject = $subject;
+        $mail->Body    = $html;
+        $mail->AltBody = $altText !== '' ? $altText : strip_tags(str_replace(['<br>','<br/>','<br />'], "\n", $html));
+
+        $mail->send();
+        return [true, ''];
+    } catch (Throwable $e) {
+        return [false, $e->getMessage()];
+    }
+}
+
+/* ================= Utilities ================= */
 function e($s): string {
     return htmlspecialchars((string)($s ?? ''), ENT_QUOTES, 'UTF-8');
 }
@@ -49,9 +110,56 @@ if (!isset($_GET['id']) || !ctype_digit($_GET['id'])) {
 }
 $booking_id = (int)$_GET['id'];
 
+/* ================= Fetch booking EARLY (for email too) ================= */
+$sql = "
+SELECT
+    b.booking_id, b.cust_id, b.car_id,
+    b.pickup_datetime, b.return_datetime,
+    b.day_count, b.daily_rate, b.total_price,
+    b.security_deposit,
+    b.security_deposit_deduction,
+    b.security_deposit_refund,
+    b.deposit_status,
+    b.deposit_last_adjusted_at,
+    b.deposit_damage_description,
+    b.pickup_mileage, b.return_mileage,
+    b.pickup_fuel_percent, b.return_fuel_percent,
+    b.status, b.rejection_reason, b.cancellation_reason,
+    b.created_at, b.confirmed_at, b.approved_at,
+    c.car_brand, c.car_model, c.daily_rate AS car_daily_rate,
+    c.plate_no, c.year, c.color, c.mileage AS car_mileage_snapshot,
+    c.transmission, c.seat_capacity,
+    cust.full_name AS customer_name,
+    cust.phone_no AS customer_phone,
+    cust.email AS customer_email,
+    cust.id_no AS customer_id_no,
+    cust.id_front_image AS cust_id_front_image,
+    cust.id_back_image AS cust_id_back_image,
+    cust.license_front_image AS cust_license_front_image,
+    cust.license_back_image AS cust_license_back_image,
+    af.guarantor_id
+FROM booking b
+JOIN car c ON b.car_id = c.car_id
+LEFT JOIN customer cust ON b.cust_id = cust.cust_id
+LEFT JOIN agreement_form af ON af.booking_id = b.booking_id
+WHERE b.booking_id = ?
+LIMIT 1
+";
+$stmt = $conn->prepare($sql);
+$stmt->bind_param('i', $booking_id);
+$stmt->execute();
+$booking = $stmt->get_result()->fetch_assoc();
+$stmt->close();
+
+if (!$booking) {
+    echo "<p>Booking not found.</p>";
+    include '../includes/footer.php';
+    exit;
+}
+
+/* ================= POST Handling (approve / fee / reject) WITH EMAIL ================= */
 $action_error = null;
 
-/* POST Handling (approve / fee / reject) */
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!hash_equals($_SESSION['csrf_token'] ?? '', $_POST['csrf_token'] ?? '')) {
         $action_error = "Invalid session token. Please refresh.";
@@ -59,6 +167,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $action = $_POST['booking_action'] ?? '';
         if (in_array($action, ['save_fee','approve'], true)) {
 
+            // Determine if there's a delivery-related service row
             $svcSel = $conn->prepare("
                 SELECT service_id
                 FROM service
@@ -117,9 +226,47 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $stmt->execute();
                     $changed = $stmt->affected_rows;
                     $stmt->close();
-                    $_SESSION['flash_message'] = $changed
-                        ? "Booking approved (Pending Payment)."
-                        : "Cannot approve: not in pending state.";
+
+                    // Send APPROVED email if status changed
+                    if ($changed) {
+                        $toEmail = (string)($booking['customer_email'] ?? '');
+                        $toName  = (string)($booking['customer_name'] ?? 'Customer');
+                        if ($toEmail !== '') {
+                            $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') ? 'https' : 'http';
+                            $host   = $_SERVER['HTTP_HOST'] ?? 'localhost';
+                            $url    = $scheme . '://' . $host . '/index.php?id=' . $booking_id;
+
+                            $pickup = $booking['pickup_datetime'] ? date('d M Y, g:i A', strtotime($booking['pickup_datetime'])) : '-';
+                            $return = $booking['return_datetime'] ? date('d M Y, g:i A', strtotime($booking['return_datetime'])) : '-';
+                            $car    = trim(($booking['car_brand'] ?? '') . ' ' . ($booking['car_model'] ?? '') . ' (' . ($booking['plate_no'] ?? '-') . ')');
+
+                            $subject = "Your Booking #{$booking_id} is Approved – Next Step: Payment";
+                            $html = "
+                                <div style='font-family:Arial,sans-serif;font-size:14px;color:#222'>
+                                  <p>Hi ".e($toName).",</p>
+                                  <p>Good news! Your booking <strong>#{$booking_id}</strong> has been <strong>approved</strong>.</p>
+                                  <p>Please log in to complete payment and view your booking details:</p>
+                                  <p><a href='".e($url)."' target='_blank' style='color:#1a54b3'>View Booking</a></p>
+                                  <hr style='border:none;border-top:1px solid #ddd'>
+                                  <p>
+                                    <strong>Car:</strong> ".e($car)."<br>
+                                    <strong>Pickup:</strong> ".e($pickup)."<br>
+                                    <strong>Return:</strong> ".e($return)."
+                                  </p>
+                                  <p style='color:#555'>Thank you for choosing TimeLess Car Rental.</p>
+                                </div>
+                            ";
+                            [$ok, $err] = send_mail_smtp($toEmail, $toName, $subject, $html);
+                            $_SESSION['flash_message'] = $ok
+                                ? "Booking approved (Pending Payment). Customer notified via email."
+                                : "Booking approved (Pending Payment). Email not sent: ".$err;
+                        } else {
+                            $_SESSION['flash_message'] = "Booking approved (Pending Payment). No customer email on record.";
+                        }
+                    } else {
+                        $_SESSION['flash_message'] = "Cannot approve: not in pending state.";
+                    }
+
                     header("Location: booking_details.php?id=".$booking_id);
                     exit;
                 }
@@ -135,9 +282,40 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $stmt->execute();
                 $changed = $stmt->affected_rows;
                 $stmt->close();
-                $_SESSION['flash_message'] = $changed
-                    ? "Booking rejected."
-                    : "Cannot reject: not in pending state.";
+
+                if ($changed) {
+                    // Send REJECTED email
+                    $toEmail = (string)($booking['customer_email'] ?? '');
+                    $toName  = (string)($booking['customer_name'] ?? 'Customer');
+                    if ($toEmail !== '') {
+                        $pickup = $booking['pickup_datetime'] ? date('d M Y, g:i A', strtotime($booking['pickup_datetime'])) : '-';
+                        $car    = trim(($booking['car_brand'] ?? '') . ' ' . ($booking['car_model'] ?? '') . ' (' . ($booking['plate_no'] ?? '-') . ')');
+
+                        $subject = "Your Booking #{$booking_id} was Rejected";
+                        $html = "
+                            <div style='font-family:Arial,sans-serif;font-size:14px;color:#222'>
+                              <p>Hi ".e($toName).",</p>
+                              <p>We’re sorry to inform you that your booking <strong>#{$booking_id}</strong> has been <strong>rejected</strong>.</p>
+                              <p><strong>Reason:</strong> ".nl2br(e($reason))."</p>
+                              <hr style='border:none;border-top:1px solid #ddd'>
+                              <p>
+                                <strong>Car:</strong> ".e($car)."<br>
+                                <strong>Original Pickup:</strong> ".e($pickup)."
+                              </p>
+                              <p style='color:#555'>If you have questions, please reply to this email or contact support.</p>
+                            </div>
+                        ";
+                        [$ok, $err] = send_mail_smtp($toEmail, $toName, $subject, $html);
+                        $_SESSION['flash_message'] = $ok
+                            ? "Booking rejected. Customer notified via email."
+                            : "Booking rejected. Email not sent: ".$err;
+                    } else {
+                        $_SESSION['flash_message'] = "Booking rejected. No customer email on record.";
+                    }
+                } else {
+                    $_SESSION['flash_message'] = "Cannot reject: not in pending state.";
+                }
+
                 header("Location: booking_details.php?id=".$booking_id);
                 exit;
             }
@@ -145,54 +323,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-/* Fetch Booking */
-$sql = "
-SELECT
-    b.booking_id, b.cust_id, b.car_id,
-    b.pickup_datetime, b.return_datetime,
-    b.day_count, b.daily_rate, b.total_price,
-    b.security_deposit,
-    b.security_deposit_deduction,
-    b.security_deposit_refund,
-    b.deposit_status,
-    b.deposit_last_adjusted_at,
-    b.deposit_damage_description,
-    b.pickup_mileage, b.return_mileage,
-    b.pickup_fuel_percent, b.return_fuel_percent,
-    b.status, b.rejection_reason, b.cancellation_reason,
-    b.created_at, b.confirmed_at, b.approved_at,
-    c.car_brand, c.car_model, c.daily_rate AS car_daily_rate,
-    c.plate_no, c.year, c.color, c.mileage AS car_mileage_snapshot,
-    c.transmission, c.seat_capacity,
-    cust.full_name AS customer_name,
-    cust.phone_no AS customer_phone,
-    cust.email AS customer_email,
-    cust.id_no AS customer_id_no,
-    cust.id_front_image AS cust_id_front_image,
-    cust.id_back_image AS cust_id_back_image,
-    cust.license_front_image AS cust_license_front_image,
-    cust.license_back_image AS cust_license_back_image,
-    af.guarantor_id
-FROM booking b
-JOIN car c ON b.car_id = c.car_id
-LEFT JOIN customer cust ON b.cust_id = cust.cust_id
-LEFT JOIN agreement_form af ON af.booking_id = b.booking_id
-WHERE b.booking_id = ?
-LIMIT 1
-";
-$stmt = $conn->prepare($sql);
-$stmt->bind_param('i', $booking_id);
-$stmt->execute();
-$booking = $stmt->get_result()->fetch_assoc();
-$stmt->close();
-
-if (!$booking) {
-    echo "<p>Booking not found.</p>";
-    include '../includes/footer.php';
-    exit;
-}
-
-/* Car primary image */
+/* ================= Car primary image ================= */
 $car_image_blob = null;
 $imgStmt = $conn->prepare("
     SELECT image_blob
@@ -207,7 +338,7 @@ $imgStmt->bind_result($car_image_blob);
 $imgStmt->fetch();
 $imgStmt->close();
 
-/* Guarantor */
+/* ================= Guarantor ================= */
 $guarantor = null;
 if (!empty($booking['guarantor_id'])) {
     $gStmt = $conn->prepare("
@@ -222,7 +353,7 @@ if (!empty($booking['guarantor_id'])) {
     $gStmt->close();
 }
 
-/* Services */
+/* ================= Services ================= */
 $svcStmt = $conn->prepare("
     SELECT service_id, service_type, fee, status, delivery_location, return_location
     FROM service
@@ -275,7 +406,7 @@ foreach ($services as $s) {
     $other_services_total += (float)$s['fee'];
 }
 
-/* Agreement (ensure visible state) */
+/* ================= Agreement (ensure visible state) ================= */
 $agreement_id = null;
 $agrStmt = $conn->prepare("SELECT agreement_id FROM agreement_form WHERE booking_id=? LIMIT 1");
 $agrStmt->bind_param('i', $booking_id);
@@ -285,7 +416,7 @@ $agrStmt->fetch();
 $agrStmt->close();
 $agreement_download_link = $agreement_id ? "download_agreement.php?id=".urlencode((string)$agreement_id) : null;
 
-/* Inspection images */
+/* ================= Inspection images ================= */
 $imgStmt = $conn->prepare("
     SELECT booking_image_id, image_path, image_type, capture_type, uploaded_at, inspection_date
     FROM booking_image
@@ -332,7 +463,7 @@ $imageTypeLabel = [
     'additional_image' => 'Additional'
 ];
 
-/* Pricing / totals */
+/* ================= Pricing / totals ================= */
 $day_count = (int)$booking['day_count'];
 $daily_rate = (float)($booking['daily_rate'] ?? $booking['car_daily_rate'] ?? 0);
 $security_deposit = (float)$booking['security_deposit'];
@@ -349,8 +480,8 @@ if ($booking['total_price'] !== null) {
 }
 $grand_plus_other = $total_price_final + $other_services_total;
 
-/* Status */
-$status = strtolower($booking['status']);
+/* ================= Status & flash ================= */
+$status = strtolower((string)$booking['status']);
 $flash_message = $_SESSION['flash_message'] ?? null;
 unset($_SESSION['flash_message']);
 
@@ -361,15 +492,15 @@ $displayLabel = match($status) {
     'completed' => 'Completed',
     'cancelled' => 'Cancelled',
     'rejected' => 'Rejected',
-    default => ucwords(str_replace('_',' ', $status)),
+    default => ucwords(str_replace('_',' ', (string)$status)),
 };
 
-/* Deposit summary */
+/* ================= Deposit summary ================= */
 $dep_original = $security_deposit;
 $dep_deduction = (float)($booking['security_deposit_deduction'] ?? 0);
 $dep_refund = (float)($booking['security_deposit_refund'] ?? max($dep_original - $dep_deduction, 0));
-$dep_status = $booking['deposit_status'] ?? 'held';
-$dep_damage_desc = $booking['deposit_damage_description'] ?? '';
+$dep_status = (string)($booking['deposit_status'] ?? 'held');
+$dep_damage_desc = (string)($booking['deposit_damage_description'] ?? '');
 $dep_status_label = match($dep_status) {
     'held' => 'Held',
     'pending_refund' => 'Pending Refund',
@@ -378,7 +509,7 @@ $dep_status_label = match($dep_status) {
     default => ucfirst(str_replace('_',' ', $dep_status))
 };
 
-/* Refund row (deposit) */
+/* Deposit refund row */
 $deposit_refund_row = null;
 $refCode = 'DEP-' . $booking_id;
 $refStmt = $conn->prepare("
@@ -981,7 +1112,6 @@ body { background:#eceef4; font-family:'Inter',Arial,sans-serif; margin:0; }
     // Other doc thumbnails (car, id, license, guarantor)
     document.querySelectorAll('.img-grid .img-thumb, .car-img-thumb').forEach(img=>{
       if (img.dataset.galleryIndex) return;
-      // Skip placeholder if not actual <img>
       if (!(img instanceof HTMLImageElement)) return;
       const src = img.getAttribute('data-full') || img.src;
       const caption = img.alt || 'Image';

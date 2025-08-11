@@ -41,14 +41,14 @@ if ($where) {
 
 $totalPages = max(1,(int)ceil($totalFiltered/$perPage));
 
-$listSql = "SELECT cust_id, full_name, phone_no, email, username, profile_status, profile_status_updated_at
+$listSql = "SELECT cust_id, full_name, phone_no, email, username
             FROM customer
             ".($where?:'')."
             ORDER BY cust_id DESC
             LIMIT ? OFFSET ?";
 $stmt = $conn->prepare($where
     ? "$listSql"
-    : "SELECT cust_id, full_name, phone_no, email, username, profile_status, profile_status_updated_at
+    : "SELECT cust_id, full_name, phone_no, email, username
        FROM customer ORDER BY cust_id DESC LIMIT ? OFFSET ?");
 if ($where) {
     $typesList = $types.'ii';
@@ -62,22 +62,6 @@ $res = $stmt->get_result();
 $rows = [];
 while ($r=$res->fetch_assoc()) $rows[]=$r;
 $stmt->close();
-
-$statusLabels = [
-    'unsubmitted'=>'Not Submitted',
-    'pending'=>'Pending',
-    'verified'=>'Verified',
-    'rejected'=>'Rejected',
-    'pending_reverification'=>'Pending Re-Verification'
-];
-function badgeClass($s){
-    return match($s){
-        'verified'=>'badge-ok',
-        'pending','pending_reverification'=>'badge-warn',
-        'rejected'=>'badge-error',
-        default=>'badge-neutral'
-    };
-}
 
 include 'admin_header.php';
 ?>
@@ -97,11 +81,6 @@ include 'admin_header.php';
 .customer-table tr:last-child td{border-bottom:none;}
 .view-btn{background:#eaf1fa;color:#2b5cbc;padding:6px 12px;border-radius:7px;text-decoration:none;font-weight:600;font-size:.65rem;display:inline-block;}
 .view-btn:hover{background:#d2ebfd;color:#1a4d7d;}
-.badge{display:inline-block;padding:4px 10px;font-size:.6rem;border-radius:14px;font-weight:600;letter-spacing:.4px;}
-.badge-ok{background:#e4f8ea;color:#1c6a34;}
-.badge-warn{background:#fff7db;color:#7a5d00;}
-.badge-error{background:#ffe2e2;color:#902121;}
-.badge-neutral{background:#e7ebf2;color:#33415c;}
 .count-summary{font-size:.7rem;color:#607086;margin-top:4px;}
 .pagination{display:flex;flex-wrap:wrap;gap:6px;padding:6px 0 12px;}
 .pagination a,.pagination span{display:inline-block;padding:6px 10px;border-radius:7px;text-decoration:none;font-size:.64rem;font-weight:600;background:#fff;border:1px solid #d5dceb;color:#2b5cbc;}
@@ -143,26 +122,20 @@ include 'admin_header.php';
           <th>Username</th>
           <th>Email</th>
           <th>Phone</th>
-          <th>Status</th>
-          <th>Updated</th>
           <th>View</th>
         </tr>
       </thead>
       <tbody>
       <?php if(!$rows): ?>
-        <tr><td colspan="8" style="text-align:center;color:#888;">No customers found.</td></tr>
-      <?php else: foreach ($rows as $i=>$c):
-          $status = $c['profile_status'] ?? 'unsubmitted';
-      ?>
+        <tr><td colspan="6" style="text-align:center;color:#888;">No customers found.</td></tr>
+      <?php else: foreach ($rows as $i=>$c): ?>
         <tr>
           <td><?= esc($offset+$i+1) ?></td>
-            <td><?= esc($c['full_name']) ?></td>
-            <td><?= esc($c['username']) ?></td>
-            <td><?= esc($c['email']) ?></td>
-            <td><?= esc($c['phone_no']) ?></td>
-            <td><span class="badge <?= badgeClass($status) ?>"><?= esc($statusLabels[$status] ?? $status) ?></span></td>
-            <td style="font-size:.6rem;"><?= esc($c['profile_status_updated_at'] ?? '') ?></td>
-            <td><a class="view-btn" href="admin_customer_view.php?cust_id=<?= (int)$c['cust_id'] ?>">View</a></td>
+          <td><?= esc($c['full_name']) ?></td>
+          <td><?= esc($c['username']) ?></td>
+          <td><?= esc($c['email']) ?></td>
+          <td><?= esc($c['phone_no']) ?></td>
+          <td><a class="view-btn" href="admin_customer_view.php?cust_id=<?= (int)$c['cust_id'] ?>">View</a></td>
         </tr>
       <?php endforeach; endif; ?>
       </tbody>

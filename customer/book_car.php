@@ -8,8 +8,9 @@ if (!isset($_SESSION['cust_id'])) {
 }
 
 include '../connect.php';
-require '../includes/profile_guard.php';
-requireVerifiedProfile($conn, (int)$_SESSION['cust_id']);
+// REMOVE profile_guard
+// require '../includes/profile_guard.php';
+// requireVerifiedProfile($conn, (int)$_SESSION['cust_id']);
 $errors = [];
 
 /*
@@ -303,7 +304,8 @@ input[readonly] { background:#f5f7fb; cursor:pointer; }
         <?php endif; ?>
 
         <div class="service-note">
-            Any delivery / pickup service fee will be confirmed later by admin. Your total will remain provisional until then.
+            Any delivery / pickup service fee will be confirmed later by admin. Your total will remain provisional until then.<br>
+            <strong>Note:</strong> The delivery fee will be updated by admin upon booking approval and is calculated based on the distance between our car rental shop and your selected pickup/return location.
         </div>
 
         <form id="booking-form" action="book_car.php?car_id=<?= $car_id ?>" method="POST" autocomplete="off" novalidate>

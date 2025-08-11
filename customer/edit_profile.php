@@ -12,14 +12,10 @@ $cust_id = (int)$_SESSION['cust_id'];
 
 $success          = false;
 $error            = '';
-$info_lock        = '';
-$statusNote       = '';
-$statusDowngraded = false;
 $updatedImages    = [];
 
 /* CONFIG */
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
-const ALLOW_EDIT_WHILE_REVERIFY = false;
 
 /* ---------- Helper: Detect MIME ---------- */
 function detectMimeType(string $path): string {
@@ -81,7 +77,7 @@ function format_phone_display(?string $digits): string {
 $stmt = $conn->prepare(
     "SELECT full_name, phone_no, email, username, id_no,
             id_front_image, id_back_image, license_front_image, license_back_image,
-            address, age, profile_status, images_version
+            address, age, images_version
      FROM customer
      WHERE cust_id=? LIMIT 1"
 );
@@ -97,14 +93,10 @@ if (!$originalUser) {
     exit;
 }
 
-$originalStatus         = $originalUser['profile_status'];
 $currentImagesVersion   = (int)$originalUser['images_version'];
-$locked_statuses        = ['pending','pending_reverification'];
-$initial_profile_locked = in_array($originalStatus, $locked_statuses, true)
-    && !(ALLOW_EDIT_WHILE_REVERIFY && $originalStatus === 'pending_reverification');
 
-/* ---------- Process POST (only if not initially locked) ---------- */
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$initial_profile_locked) {
+/* ---------- Process POST ---------- */
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     $full_name_raw = trim($_POST['full_name'] ?? '');
     $username_raw  = trim($_POST['username'] ?? '');
@@ -133,7 +125,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$initial_profile_locked) {
         $error = "Invalid NRIC / ID (must be exactly 12 digits).";
     }
 
-    // Derive age from NRIC
+    // Derive age from NRIC (automatic)
     $age = $age_form;
     if (!$error && strlen($id_digits) === 12) {
         $yy = substr($id_digits,0,2);
@@ -173,19 +165,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$initial_profile_locked) {
             $params[] = $v;
         }
 
-        // Detect critical changes (trigger re-verification if verified)
-        $criticalFieldNames = ['full_name','id_no'];
-        $criticalChanged = false;
-        foreach ($criticalFieldNames as $cf) {
-            $oldVal = $originalUser[$cf];
-            $newVal = ($cf === 'id_no') ? $id_digits : $fields[$cf];
-            if (trim((string)$oldVal) !== trim((string)$newVal)) {
-                $criticalChanged = true;
-                break;
-            }
-        }
-
-        // Handle images + detect if any replaced (critical)
+        // Handle images + detect if any replaced
         $ALLOWED = ['image/jpeg','image/png','image/webp','image/gif'];
         $imageInputs = [
             'id_front_image'      => 'id_front_image',
@@ -234,7 +214,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$initial_profile_locked) {
             $sets[] = "$col=?";
             $types .= 's';
             $params[] = $blob;
-            $criticalChanged = true;
             $updatedImages[] = $input;
         }
 
@@ -243,12 +222,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$initial_profile_locked) {
             if ($updatedImages) {
                 $sets[] = "images_version = images_version + 1";
                 $sets[] = "images_updated_at = NOW()";
-            }
-
-            if ($originalStatus === 'verified' && $criticalChanged) {
-                $sets[] = "profile_status='pending_reverification'";
-                $sets[] = "profile_status_updated_at=NOW()";
-                $statusDowngraded = true;
             }
 
             if (!$sets) {
@@ -282,7 +255,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$initial_profile_locked) {
     $stmt = $conn->prepare(
         "SELECT full_name, phone_no, email, username, id_no,
                 id_front_image, id_back_image, license_front_image, license_back_image,
-                address, age, profile_status, images_version
+                address, age, images_version
          FROM customer WHERE cust_id=? LIMIT 1"
     );
     $stmt->bind_param("i",$cust_id);
@@ -294,27 +267,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$initial_profile_locked) {
         $originalUser = $newUser;
         $currentImagesVersion = (int)$originalUser['images_version'];
     }
-} elseif ($_SERVER['REQUEST_METHOD'] === 'POST' && $initial_profile_locked) {
-    $error = "Profile is locked during review. No changes applied.";
-}
-
-/* ---------- Final lock state after potential downgrade ---------- */
-$currentStatus  = $originalUser['profile_status'];
-$profile_locked = in_array($currentStatus, $locked_statuses, true)
-    && !(ALLOW_EDIT_WHILE_REVERIFY && $currentStatus === 'pending_reverification');
-if ($profile_locked) {
-    $info_lock = ($currentStatus === 'pending')
-        ? 'Your profile is under verification review. Editing is disabled until a decision is made.'
-        : 'Your profile changes are undergoing re-verification. Editing is disabled until approved.';
 }
 
 /* ---------- Display values ---------- */
 $display_phone = format_phone_display($originalUser['phone_no']);
 $display_id    = format_nric_display($originalUser['id_no']);
-
-function lockAttr(bool $locked): string {
-    return $locked ? 'disabled style=\"background:#eef0f3;cursor:not-allowed;\"' : '';
-}
 
 // Cache buster = images_version
 $imgBust = '&v=' . $currentImagesVersion;
@@ -323,8 +280,6 @@ $imgBust = '&v=' . $currentImagesVersion;
 <style>
 .edit-container { max-width:760px;margin:40px auto 70px;background:#fff;padding:36px 40px 40px;border-radius:14px;box-shadow:0 4px 18px rgba(44,60,102,0.09); }
 .edit-title { font-size:1.34em;font-weight:700;color:#2f377d;margin-bottom:18px;text-align:center; }
-.lock-banner { background:#fff4d6;border:1px solid #f8d58e;padding:11px 16px;border-radius:10px;font-size:.78em;color:#765500;margin-bottom:18px;line-height:1.35em; }
-.status-note { background:#e4f6eb;border:1px solid #bde6cc;padding:9px 14px;border-radius:10px;font-size:.75em;color:#1f6d36;margin-top:12px;text-align:center; }
 .edit-form label { display:block;margin-top:16px;margin-bottom:6px;font-weight:600;color:#3c4cb8;font-size:.94em; }
 .edit-form input[type="text"], .edit-form input[type="email"], .edit-form input[type="number"], .edit-form textarea {
     width:100%;padding:9px 10px;border:1px solid #cdd3e3;border-radius:6px;font-size:.98em;background:#f9fafc;margin-bottom:2px;
@@ -355,22 +310,11 @@ $imgBust = '&v=' . $currentImagesVersion;
 <div class="edit-container">
     <div class="edit-title">Edit My Profile</div>
 
-    <?php if ($info_lock): ?>
-        <div class="lock-banner">
-            <?= htmlspecialchars($info_lock) ?><br>
-            To change identity data again, wait for the review result.
-        </div>
-    <?php endif; ?>
-
     <?php if ($success && !$error): ?>
         <div class="success-msg">
             Profile updated successfully!
             <?php if ($updatedImages): ?><br><span style="font-size:.8em;">Images updated: <?= htmlspecialchars(implode(', ', $updatedImages)) ?> (version <?= $currentImagesVersion ?>)</span><?php endif; ?>
-            <?php if ($statusDowngraded): ?><div class="status-note" style="margin-top:10px;">Critical changes detected. Profile sent for re-verification.</div><?php endif; ?>
         </div>
-    <?php endif; ?>
-    <?php if ($statusDowngraded && !$success && !$error): ?>
-        <div class="status-note">Critical changes detected. Profile sent for re-verification.</div>
     <?php endif; ?>
     <?php if ($error): ?>
         <div class="error-msg"><?= htmlspecialchars($error) ?></div>
@@ -378,20 +322,19 @@ $imgBust = '&v=' . $currentImagesVersion;
 
     <form class="edit-form" action="" method="post" enctype="multipart/form-data" autocomplete="off">
         <label for="full_name">Full Name</label>
-        <input type="text" name="full_name" id="full_name" value="<?= htmlspecialchars($originalUser['full_name']) ?>" <?= lockAttr($profile_locked) ?> required>
+        <input type="text" name="full_name" id="full_name" value="<?= htmlspecialchars($originalUser['full_name']) ?>" required>
 
         <label for="username">Username</label>
-        <input type="text" name="username" id="username" value="<?= htmlspecialchars($originalUser['username']) ?>" <?= lockAttr($profile_locked) ?> required>
+        <input type="text" name="username" id="username" value="<?= htmlspecialchars($originalUser['username']) ?>" required>
 
         <label for="email">Email</label>
-        <input type="email" name="email" id="email" value="<?= htmlspecialchars($originalUser['email']) ?>" <?= lockAttr($profile_locked) ?> required>
+        <input type="email" name="email" id="email" value="<?= htmlspecialchars($originalUser['email']) ?>" required>
 
         <label for="phone_no">Phone No (Mobile)</label>
-        <input type="text" name="phone_no" id="phone_no" value="<?= htmlspecialchars($display_phone) ?>" <?= lockAttr($profile_locked) ?> required>
+        <input type="text" name="phone_no" id="phone_no" value="<?= htmlspecialchars($display_phone) ?>" required>
 
         <label for="id_no">NRIC / ID No</label>
-        <input type="text" name="id_no" id="id_no" value="<?= htmlspecialchars($display_id) ?>" <?= lockAttr($profile_locked) ?> maxlength="14" required>
-        <div class="section-sub">Changing NRIC triggers re-verification when verified.</div>
+        <input type="text" name="id_no" id="id_no" value="<?= htmlspecialchars($display_id) ?>" maxlength="14" required>
 
         <label for="age">Age</label>
         <input type="number" min="0" name="age" id="age" value="<?= htmlspecialchars($originalUser['age']) ?>" readonly style="background:#e4e7ee;">
@@ -399,7 +342,7 @@ $imgBust = '&v=' . $currentImagesVersion;
         <hr class="separator">
 
         <label>Identity & License Documents (Version <?= $currentImagesVersion ?>)</label>
-        <div class="section-sub">Replacing any document while verified triggers re-verification.</div>
+        <div class="section-sub">You can update your documents at any time.</div>
 
         <div class="flex-docs">
             <!-- ID Front -->
@@ -410,7 +353,7 @@ $imgBust = '&v=' . $currentImagesVersion;
                 <?php else: ?>
                     <div style="height:110px;border:1px dashed #bcc6d6;border-radius:8px;display:flex;align-items:center;justify-content:center;background:#fff;font-size:.75em;color:#768099;">No Image</div>
                 <?php endif; ?>
-                <input type="file" name="id_front_image" id="id_front_image" accept="image/*" <?= lockAttr($profile_locked) ?>>
+                <input type="file" name="id_front_image" id="id_front_image" accept="image/*">
                 <img id="preview_id_front_image" class="new-preview" alt="New ID Front Preview">
                 <span class="note">Max 5MB (jpg/png/webp/gif)</span>
                 <div id="msg_id_front_image" class="inline-warn"></div>
@@ -423,7 +366,7 @@ $imgBust = '&v=' . $currentImagesVersion;
                 <?php else: ?>
                     <div style="height:110px;border:1px dashed #bcc6d6;border-radius:8px;display:flex;align-items:center;justify-content:center;background:#fff;font-size:.75em;color:#768099;">No Image</div>
                 <?php endif; ?>
-                <input type="file" name="id_back_image" id="id_back_image" accept="image/*" <?= lockAttr($profile_locked) ?>>
+                <input type="file" name="id_back_image" id="id_back_image" accept="image/*">
                 <img id="preview_id_back_image" class="new-preview" alt="New ID Back Preview">
                 <span class="note">Max 5MB</span>
                 <div id="msg_id_back_image" class="inline-warn"></div>
@@ -436,7 +379,7 @@ $imgBust = '&v=' . $currentImagesVersion;
                 <?php else: ?>
                     <div style="height:110px;border:1px dashed #bcc6d6;border-radius:8px;display:flex;align-items:center;justify-content:center;background:#fff;font-size:.75em;color:#768099;">No Image</div>
                 <?php endif; ?>
-                <input type="file" name="license_front_image" id="license_front_image" accept="image/*" <?= lockAttr($profile_locked) ?>>
+                <input type="file" name="license_front_image" id="license_front_image" accept="image/*">
                 <img id="preview_license_front_image" class="new-preview" alt="New License Front Preview">
                 <span class="note">Max 5MB</span>
                 <div id="msg_license_front_image" class="inline-warn"></div>
@@ -449,7 +392,7 @@ $imgBust = '&v=' . $currentImagesVersion;
                 <?php else: ?>
                     <div style="height:110px;border:1px dashed #bcc6d6;border-radius:8px;display:flex;align-items:center;justify-content:center;background:#fff;font-size:.75em;color:#768099;">No Image</div>
                 <?php endif; ?>
-                <input type="file" name="license_back_image" id="license_back_image" accept="image/*" <?= lockAttr($profile_locked) ?>>
+                <input type="file" name="license_back_image" id="license_back_image" accept="image/*">
                 <img id="preview_license_back_image" class="new-preview" alt="New License Back Preview">
                 <span class="note">Max 5MB</span>
                 <div id="msg_license_back_image" class="inline-warn"></div>
@@ -459,9 +402,9 @@ $imgBust = '&v=' . $currentImagesVersion;
         <hr class="separator">
 
         <label for="address">Address</label>
-        <textarea name="address" id="address" <?= lockAttr($profile_locked) ?> required><?= htmlspecialchars($originalUser['address']) ?></textarea>
+        <textarea name="address" id="address" required><?= htmlspecialchars($originalUser['address']) ?></textarea>
 
-        <button type="submit" <?= $profile_locked ? 'disabled' : '' ?>>Save Changes</button>
+        <button type="submit">Save Changes</button>
     </form>
 
     <button class="back-btn" onclick="window.location.href='profile.php'">Back</button>
@@ -481,13 +424,51 @@ function formatMYMobile(v){
   if(d.length<=3) return d;
   return d.slice(0,3)+'-'+d.slice(3);
 }
+
+// Auto-calculate age from NRIC
+function calculateAgeFromNRIC(nric) {
+    const digits = nric.replace(/\D+/g,'');
+    if (digits.length < 6) return '';
+    let yy = parseInt(digits.slice(0,2), 10);
+    let mm = parseInt(digits.slice(2,4), 10);
+    let dd = parseInt(digits.slice(4,6), 10);
+    let today = new Date();
+
+    let currentYY = parseInt(today.getFullYear().toString().slice(-2));
+    let century = (yy <= currentYY) ? 2000 : 1900;
+    let birthYear = century + yy;
+
+    // Validate month and day
+    if (isNaN(mm) || mm < 1 || mm > 12) return '';
+    if (isNaN(dd) || dd < 1 || dd > 31) return '';
+
+    let birthDate = new Date(birthYear, mm - 1, dd);
+    if (isNaN(birthDate.getTime())) return '';
+
+    let age = today.getFullYear() - birthYear;
+    if (
+        today.getMonth() < birthDate.getMonth() ||
+        (today.getMonth() === birthDate.getMonth() && today.getDate() < birthDate.getDate())
+    ) {
+        age--;
+    }
+    return (age >= 0 && age < 130) ? age : '';
+}
+
 const idInput=document.getElementById('id_no');
 const phoneInput=document.getElementById('phone_no');
-if (idInput && !idInput.disabled) {
-  idInput.addEventListener('input',()=>{ idInput.value=formatNRIC(idInput.value); });
-  idInput.value=formatNRIC(idInput.value);
+const ageInput=document.getElementById('age');
+if (idInput) {
+  idInput.addEventListener('input',function() {
+    idInput.value = formatNRIC(idInput.value);
+    if (ageInput) {
+      ageInput.value = calculateAgeFromNRIC(idInput.value);
+    }
+  });
+  // On page load, set age if ID exists
+  if (ageInput) ageInput.value = calculateAgeFromNRIC(idInput.value);
 }
-if (phoneInput && !phoneInput.disabled) {
+if (phoneInput) {
   phoneInput.addEventListener('input',()=>{ phoneInput.value=formatMYMobile(phoneInput.value); });
   phoneInput.value=formatMYMobile(phoneInput.value);
 }
