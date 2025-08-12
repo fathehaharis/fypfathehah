@@ -1,0 +1,583 @@
+<?php
+declare(strict_types=1);
+ini_set('display_errors', 1);
+ini_set('display_startup_errors', 1);
+error_reporting(E_ALL);
+
+session_start();
+require_once '../connect.php';
+date_default_timezone_set('Asia/Kuala_Lumpur');
+
+if (empty($_SESSION['staff_id'])) {
+    header("Location: staff_login.php");
+    exit;
+}
+$staff_id = (int)$_SESSION['staff_id'];
+
+function e($s): string { return htmlspecialchars((string)($s ?? ''), ENT_QUOTES, 'UTF-8'); }
+
+/* CSRF */
+function csrf_token(): string {
+    if (empty($_SESSION['staff_csrf'])) {
+        $_SESSION['staff_csrf'] = bin2hex(random_bytes(32));
+    }
+    return $_SESSION['staff_csrf'];
+}
+function verify_csrf(): bool {
+    return isset($_POST['csrf_token'], $_SESSION['staff_csrf'])
+        && hash_equals($_SESSION['staff_csrf'], $_POST['csrf_token']);
+}
+
+/* Input params */
+$booking_id = isset($_GET['booking_id']) && ctype_digit($_GET['booking_id'])
+    ? (int)$_GET['booking_id'] : 0;
+
+$allowed_capture = ['pickup','return'];
+$type = isset($_GET['type']) && in_array(strtolower($_GET['type']), $allowed_capture, true)
+    ? strtolower($_GET['type']) : 'pickup';
+
+if ($booking_id <= 0) {
+    echo "<p>Invalid booking ID.</p>";
+    include '../includes/footer.php';
+    exit;
+}
+
+/* Authorization: ensure this staff is assigned to this booking */
+$assignStmt = $conn->prepare("
+    SELECT s.service_id, s.service_type
+      FROM service s
+     WHERE s.booking_id = ? AND s.staff_id = ?
+     ORDER BY s.service_id DESC
+     LIMIT 1
+");
+$assignStmt->bind_param('ii', $booking_id, $staff_id);
+$assignStmt->execute();
+$assignment = $assignStmt->get_result()->fetch_assoc();
+$assignStmt->close();
+
+if (!$assignment) {
+    http_response_code(403);
+    echo "<p>Access denied. You are not assigned to this booking.</p>";
+    include '../includes/footer.php';
+    exit;
+}
+$service_id = (int)$assignment['service_id'];
+$service_type = (string)$assignment['service_type'];
+
+/* Fetch booking */
+$stmt = $conn->prepare("
+    SELECT b.*, c.car_brand, c.car_model, c.plate_no, c.mileage AS car_mileage, c.car_id
+      FROM booking b
+      JOIN car c   ON b.car_id = c.car_id
+     WHERE b.booking_id = ?
+     LIMIT 1
+");
+$stmt->bind_param("i", $booking_id);
+$stmt->execute();
+$booking = $stmt->get_result()->fetch_assoc();
+$stmt->close();
+
+if (!$booking) {
+    echo "<p>Booking not found.</p>";
+    include '../includes/footer.php';
+    exit;
+}
+
+$car_id = (int)$booking['car_id'];
+$current_car_mileage = (int)$booking['car_mileage'];
+
+/* Existing images for chosen type */
+$imgStmt = $conn->prepare("
+    SELECT booking_image_id, image_path, image_type, capture_type, uploaded_at, inspection_date
+      FROM booking_image
+     WHERE booking_id=? AND capture_type=?
+     ORDER BY uploaded_at ASC
+");
+$imgStmt->bind_param("is", $booking_id, $type);
+$imgStmt->execute();
+$images = $imgStmt->get_result()->fetch_all(MYSQLI_ASSOC);
+$imgStmt->close();
+
+/* Determine if inspection already filled */
+if ($type === 'pickup') {
+    $is_filled = !empty($booking['pickup_mileage'])
+        && $booking['pickup_fuel_percent'] !== null
+        && !empty($booking['pickup_datetime'])
+        && count($images) > 0;
+    $booking_level_remarks = $booking['pickup_inspection_remarks'] ?? '';
+} else {
+    $is_filled = !empty($booking['return_mileage'])
+        && $booking['return_fuel_percent'] !== null
+        && !empty($booking['return_datetime'])
+        && count($images) > 0;
+    $booking_level_remarks = $booking['return_inspection_remarks'] ?? '';
+}
+
+$inspection_date_display = $images ? ($images[0]['inspection_date'] ?? '') : '';
+
+/* Slots */
+$slot_definitions = [
+    'car_front'       => ['label'=>'Car Front',       'required'=>true],
+    'car_back'        => ['label'=>'Car Back',        'required'=>true],
+    'car_left'        => ['label'=>'Car Left Side',   'required'=>true],
+    'car_right'       => ['label'=>'Car Right Side',  'required'=>true],
+    'fuel_image'      => ['label'=>'Fuel Gauge',      'required'=>true],
+    'additional_image'=> ['label'=>'Additional',      'required'=>false],
+];
+
+$errors = [];
+
+/* Handle POST (create only, not edits) */
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_filled) {
+    if (!verify_csrf()) {
+        $errors[] = "Invalid session token.";
+    } else {
+        $mileage = isset($_POST['mileage']) ? (int)$_POST['mileage'] : 0;
+        $fuel_percent = isset($_POST['fuel_percent']) ? (int)$_POST['fuel_percent'] : -1;
+        $inspection_date_raw = $_POST['inspection_date'] ?? '';
+        $remarks = trim($_POST['remarks'] ?? '');
+
+        /* Basic validations */
+        if ($mileage < 0) $errors[] = "Mileage cannot be negative.";
+        if ($fuel_percent < 0 || $fuel_percent > 100) $errors[] = "Fuel percent must be between 0 and 100.";
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/', $inspection_date_raw)) {
+            $errors[] = "Invalid inspection date format.";
+        }
+        $inspection_date_sql = $inspection_date_raw
+            ? str_replace('T',' ',$inspection_date_raw).":00"
+            : date('Y-m-d H:i:s');
+
+        if ($type === 'return'
+            && !empty($booking['pickup_mileage'])
+            && $mileage < (int)$booking['pickup_mileage']
+        ) {
+            $errors[] = "Return mileage cannot be less than pickup mileage (".(int)$booking['pickup_mileage'].").";
+        }
+
+        /* Files */
+        $allowed_mime = ['image/jpeg','image/png','image/jpg'];
+        $max_size = 6 * 1024 * 1024;
+        $images_to_insert = [];
+
+        foreach ($slot_definitions as $key => $meta) {
+            $filePresent = !empty($_FILES['images']['name'][$key]);
+            if ($meta['required'] && !$filePresent) {
+                $errors[] = "Missing required image: ".$meta['label'];
+                continue;
+            }
+            if ($filePresent) {
+                $err  = $_FILES['images']['error'][$key];
+                $mime = $_FILES['images']['type'][$key] ?? '';
+                $size = $_FILES['images']['size'][$key] ?? 0;
+                $tmp  = $_FILES['images']['tmp_name'][$key] ?? '';
+                if ($err !== UPLOAD_ERR_OK) { $errors[] = "Upload error for ".$meta['label']."."; continue; }
+                if (!in_array($mime, $allowed_mime, true)) { $errors[] = $meta['label']." has unsupported file type."; continue; }
+                if ($size <= 0 || $size > $max_size) { $errors[] = $meta['label']." exceeds 6MB limit."; continue; }
+                $blob = file_get_contents($tmp);
+                if ($blob === false) { $errors[] = "Failed to read file for ".$meta['label']."."; continue; }
+                $images_to_insert[] = [
+                    'blob'       => $blob,
+                    'image_type' => $key
+                ];
+            }
+        }
+
+        if (!$errors) {
+            $conn->begin_transaction();
+            try {
+                /* Update booking core fields */
+                if ($type === 'pickup') {
+                    $stmt = $conn->prepare("
+                        UPDATE booking
+                           SET pickup_mileage=?,
+                               pickup_fuel_percent=?,
+                               updated_at=NOW()
+                         WHERE booking_id=?");
+                    $stmt->bind_param('iii', $mileage, $fuel_percent, $booking_id);
+                    $stmt->execute();
+                    $stmt->close();
+
+                    if ($mileage > $current_car_mileage) {
+                        $stmt = $conn->prepare("UPDATE car SET mileage=? WHERE car_id=?");
+                        $stmt->bind_param('ii', $mileage, $car_id);
+                        $stmt->execute();
+                        $stmt->close();
+                    }
+
+                    if (array_key_exists('pickup_inspection_remarks', $booking)) {
+                        $stmt = $conn->prepare("
+                            UPDATE booking
+                               SET pickup_inspection_remarks=?,
+                                   updated_at=NOW()
+                             WHERE booking_id=?");
+                        $stmt->bind_param('si', $remarks, $booking_id);
+                        $stmt->execute();
+                        $stmt->close();
+                    }
+                } else {
+                    $stmt = $conn->prepare("
+                        UPDATE booking
+                           SET return_mileage=?,
+                               return_fuel_percent=?,
+                               updated_at=NOW()
+                         WHERE booking_id=?");
+                    $stmt->bind_param('iii', $mileage, $fuel_percent, $booking_id);
+                    $stmt->execute();
+                    $stmt->close();
+
+                    if ($mileage > $current_car_mileage) {
+                        $stmt = $conn->prepare("UPDATE car SET mileage=? WHERE car_id=?");
+                        $stmt->bind_param('ii', $mileage, $car_id);
+                        $stmt->execute();
+                        $stmt->close();
+                    }
+
+                    if (array_key_exists('return_inspection_remarks', $booking)) {
+                        $stmt = $conn->prepare("
+                            UPDATE booking
+                               SET return_inspection_remarks=?,
+                                   updated_at=NOW()
+                             WHERE booking_id=?");
+                        $stmt->bind_param('si', $remarks, $booking_id);
+                        $stmt->execute();
+                        $stmt->close();
+                    }
+                }
+
+                /* Insert inspection images */
+                $imgInsert = $conn->prepare("
+                    INSERT INTO booking_image
+                        (booking_id, image_path, image_type, capture_type, inspection_date, uploaded_at)
+                    VALUES (?, ?, ?, ?, ?, NOW())
+                ");
+                foreach ($images_to_insert as $imgData) {
+                    $blob = $imgData['blob'];
+                    $img_type = $imgData['image_type'];
+                    $imgInsert->bind_param(
+                        'ibsss',
+                        $booking_id,
+                        $blob,
+                        $img_type,
+                        $type,
+                        $inspection_date_sql
+                    );
+                    $imgInsert->send_long_data(1, $blob);
+                    $imgInsert->execute();
+                }
+                $imgInsert->close();
+
+                /* Leg status updates */
+                if ($type === 'pickup') {
+                    $st = $conn->prepare("UPDATE service SET pickup_status='delivered', pickup_status_at=NOW() WHERE service_id=? AND staff_id=?");
+                    $st->bind_param('ii', $service_id, $staff_id);
+                    $st->execute();
+                    $st->close();
+                } else {
+                    $st = $conn->prepare("UPDATE service SET return_status='delivered', return_status_at=NOW() WHERE service_id=? AND staff_id=?");
+                    $st->bind_param('ii', $service_id, $staff_id);
+                    $st->execute();
+                    $st->close();
+                }
+
+                /* If both legs delivered (pickup_and_return) or pickup delivered (delivery), set overall status delivered */
+                $svcChk = $conn->prepare("SELECT service_type, pickup_status, return_status FROM service WHERE service_id=? LIMIT 1");
+                $svcChk->bind_param('i', $service_id);
+                $svcChk->execute();
+                $svc = $svcChk->get_result()->fetch_assoc();
+                $svcChk->close();
+
+                if ($svc) {
+                    $shouldDeliver = false;
+                    if ($svc['service_type'] === 'pickup_and_return') {
+                        $shouldDeliver = ($svc['pickup_status'] === 'delivered' && $svc['return_status'] === 'delivered');
+                    } elseif ($svc['service_type'] === 'delivery') {
+                        $shouldDeliver = ($svc['pickup_status'] === 'delivered');
+                    }
+                    if ($shouldDeliver) {
+                        $st2 = $conn->prepare("UPDATE service SET status='delivered' WHERE service_id=? AND staff_id=?");
+                        $st2->bind_param('ii', $service_id, $staff_id);
+                        $st2->execute();
+                        $st2->close();
+                    }
+                }
+
+                $conn->commit();
+
+                $_SESSION['success'] = ucfirst($type) . " inspection saved.";
+                header("Location: inspection_add.php?booking_id=".$booking_id."&type=".$type);
+                exit;
+
+            } catch (Throwable $ex) {
+                $conn->rollback();
+                $errors[] = "Failed to save inspection: " . $ex->getMessage();
+            }
+        }
+    }
+}
+
+$display_remarks = $is_filled ? $booking_level_remarks : '';
+
+include 'staff_header.php';
+?>
+<link rel="stylesheet" href="/assets/css/style.css">
+<style>
+body { background:#f8f9fb; }
+.inspection-card { max-width:1060px; margin:38px auto 40px; background:#fff; border-radius:16px; box-shadow:0 6px 28px #d3d8ef44; padding:36px 42px 34px; border:1px solid #f1f2f8; position:relative;}
+.back-link {
+  position:absolute; top:10px; right:16px;
+  background:#e0e6ef; color:#24324d; text-decoration:none;
+  padding:8px 16px; border-radius:8px; font-size:.7rem;
+  font-weight:700; letter-spacing:.4px; transition:background .15s;
+}
+.back-link:hover { background:#cdd5e2; }
+.inspection-title { font-size:1.32em; font-weight:800; color:#2d397c; margin:0 0 20px; letter-spacing:.5px; }
+.section-sub { font-size:.8em; color:#5d6a85; margin:-6px 0 18px; }
+.edit-info { display:flex; gap:10px; align-items:center; margin:8px 0 16px; font-size:.78rem; color:#6a768d; }
+.edit-btn {
+  background:#355adf; color:#fff; text-decoration:none; padding:8px 16px;
+  border-radius:8px; font-size:.72rem; font-weight:700; letter-spacing:.5px;
+}
+.edit-btn:hover { background:#254abf; }
+.flex-row { display:flex; flex-wrap:wrap; gap:18px; margin-bottom:18px; }
+.field { flex:1 1 180px; display:flex; flex-direction:column; }
+.field label { font-weight:600; font-size:.83em; margin-bottom:6px; color:#394569; letter-spacing:.4px; }
+.field input, .field select, .field textarea { border:1.5px solid #d6d9e4; border-radius:7px; padding:8px 12px; font-size:.92em; background:#f8fafe; }
+.field textarea { resize:vertical; min-height:72px; }
+.image-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(170px,1fr)); gap:20px; margin-top:8px; }
+.image-slot { border:1.5px solid #d6d9e4; border-radius:12px; padding:14px 14px 16px; background:#f9fbfe; position:relative; display:flex; flex-direction:column; }
+.image-slot.required { border-color:#c5d2ff; }
+.image-slot h4 { margin:0 0 10px; font-size:.68rem; font-weight:800; color:#2f3d6d; letter-spacing:.6px; text-transform:uppercase; line-height:1.1rem; }
+.slot-required-tag { position:absolute; top:6px; right:6px; background:#ffefbd; color:#8a6100; font-size:.52rem; padding:3px 6px; border-radius:6px; font-weight:700; letter-spacing:.5px; }
+.preview-box { margin-top:10px; width:100%; aspect-ratio:4/3; background:#eef2f8; border:1px solid #d4dbe6; border-radius:8px; display:flex; align-items:center; justify-content:center; font-size:.6rem; color:#6a768a; overflow:hidden; position:relative; cursor:pointer; }
+.preview-box img { width:100%; height:100%; object-fit:cover; display:none; }
+.preview-box.has-image img { display:block; }
+.preview-box .placeholder-text { padding:4px 6px; text-align:center; }
+.preview-filename { margin-top:6px; font-size:.55rem; color:#58657c; word-break:break-all; line-height:.9rem; min-height:1rem; }
+.pickup-images-row { display:flex; gap:18px; flex-wrap:wrap; margin-top:18px; }
+.pickup-image-box { border:1.5px solid #d6d9e4; border-radius:8px; padding:10px 12px; background:#f8faff; text-align:center; width:130px; }
+.pickup-image-box img { width:100%; height:78px; object-fit:cover; border-radius:6px; border:1px solid #dfe4ee; background:#fff; cursor:pointer; }
+.pickup-image-label { font-size:.7rem; color:#4d5990; margin-top:6px; font-weight:600; letter-spacing:.4px; }
+.flash-success { background:#eafdeb; color:#218c3b; padding:12px 18px; border-radius:8px; font-weight:600; margin:0 0 18px; }
+.error-box { background:#fdeaea; color:#b22; padding:12px 18px; border-radius:8px; font-weight:600; margin:0 0 18px; font-size:.9em; }
+.submit-btn { background:linear-gradient(90deg,#4158d0 0%,#6d8be6 100%); color:#fff; border:none; padding:14px 46px; border-radius:9px; font-weight:700; font-size:.95em; margin-top:26px; box-shadow:0 3px 12px #b5bee555; cursor:pointer; transition:background .18s; }
+.submit-btn:hover { background:linear-gradient(90deg,#2b5cbc 0%,#4158d0 100%); }
+@media (max-width:920px){ .inspection-card { padding:28px 24px 36px; } .image-grid { grid-template-columns:repeat(auto-fill, minmax(150px,1fr)); gap:16px; } .back-link { position:static; display:inline-block; margin-bottom:14px; } }
+#imgModal { position:fixed; inset:0; background:rgba(18,27,45,.85); display:none; align-items:center; justify-content:center; z-index:9999; padding:40px 26px; }
+#imgModal img { max-width:95vw; max-height:85vh; box-shadow:0 8px 28px rgba(0,0,0,.55); border-radius:10px; background:#fff; }
+#imgModal .close-btn { position:absolute; top:18px; right:24px; background:#fff; border:none; padding:8px 14px; border-radius:6px; font-weight:700; cursor:pointer; box-shadow:0 2px 8px rgba(0,0,0,.25); font-size:.8em; }
+#imgModal .close-btn:hover { background:#f0f3f9; }
+</style>
+
+<div class="inspection-card">
+    <a class="back-link" href="delivery_staff_booking_details.php?id=<?= e($booking_id) ?>">&#8592; Back to Booking</a>
+
+    <div class="inspection-title">
+        <?= ucfirst($type) ?> Inspection — <?= e($booking['car_brand'].' '.$booking['car_model']) ?> (<?= e($booking['plate_no']) ?>)
+    </div>
+    <div class="section-sub">
+        Required images: Front, Back, Left, Right, Fuel Gauge. Click previews to enlarge.
+    </div>
+
+    <?php if (!empty($_SESSION['success'])): ?>
+        <div class="flash-success"><?= e($_SESSION['success']) ?></div>
+        <?php unset($_SESSION['success']); ?>
+    <?php endif; ?>
+
+    <?php if ($errors): ?>
+        <div class="error-box">
+            <?php foreach ($errors as $err): ?><div><?= e($err) ?></div><?php endforeach; ?>
+        </div>
+    <?php endif; ?>
+
+    <?php if ($is_filled): ?>
+        <div class="edit-info">
+            This inspection has been recorded.
+            <a class="edit-btn" href="edit_inspection.php?booking_id=<?= (int)$booking_id ?>&type=<?= e($type) ?>">Edit Inspection</a>
+        </div>
+
+        <div style="font-weight:700;color:#2d397c;margin-top:12px;">Mileage (km):</div>
+        <div><?= e($type === 'pickup' ? $booking['pickup_mileage'] : $booking['return_mileage']) ?></div>
+
+        <div style="font-weight:700;color:#2d397c;margin-top:12px;">Fuel Percent (%):</div>
+        <div><?= e($type === 'pickup' ? $booking['pickup_fuel_percent'] : $booking['return_fuel_percent']) ?></div>
+
+        <div style="font-weight:700;color:#2d397c;margin-top:12px;">Inspection Date:</div>
+        <div><?= $inspection_date_display ? e($inspection_date_display) : '-' ?></div>
+
+        <?php if ($booking_level_remarks): ?>
+            <div style="font-weight:700;color:#2d397c;margin-top:12px;">Remarks:</div>
+            <div><?= nl2br(e($booking_level_remarks)) ?></div>
+        <?php endif; ?>
+
+        <div style="font-weight:700;color:#2d397c;margin-top:14px;">Images</div>
+        <div class="pickup-images-row">
+            <?php foreach ($images as $img): ?>
+                <div class="pickup-image-box">
+                    <img
+                        src="data:image/jpeg;base64,<?= base64_encode($img['image_path']) ?>"
+                        alt="Inspection Image"
+                        data-full="data:image/jpeg;base64,<?= base64_encode($img['image_path']) ?>">
+                    <div class="pickup-image-label">
+                        <?= e($img['image_type']) ?><br><?= e($img['capture_type']) ?>
+                    </div>
+                    <div style="font-size:.55rem;color:#889;margin-top:4px;"><?= e($img['uploaded_at']) ?></div>
+                </div>
+            <?php endforeach; ?>
+        </div>
+    <?php else: ?>
+        <form method="post" enctype="multipart/form-data" autocomplete="off">
+            <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
+
+            <div class="flex-row">
+                <div class="field">
+                    <label>Mileage (km)</label>
+                    <input type="number" name="mileage" min="0" value="<?= (int)$current_car_mileage ?>" required>
+                </div>
+                <div class="field">
+                    <label>Fuel Percent (%)</label>
+                    <select name="fuel_percent" required>
+                        <option value="">Select</option>
+                        <?php foreach ([10,20,30,40,50,60,70,80,90,100] as $p): ?>
+                            <option value="<?= $p ?>"><?= $p ?>%</option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div class="field">
+                    <label>Inspection Date</label>
+                    <input type="datetime-local" name="inspection_date" value="<?= e(date('Y-m-d\TH:i')) ?>" required>
+                </div>
+            </div>
+
+            <div class="image-grid">
+                <?php foreach ($slot_definitions as $key => $meta): ?>
+                    <div class="image-slot <?= $meta['required'] ? 'required' : '' ?>">
+                        <h4><?= e($meta['label']) ?></h4>
+                        <?php if ($meta['required']): ?>
+                            <span class="slot-required-tag">REQUIRED</span>
+                        <?php endif; ?>
+                        <input
+                            type="file"
+                            name="images[<?= e($key) ?>]"
+                            accept="image/*"
+                            <?= $meta['required'] ? 'required' : '' ?>
+                            data-slot="<?= e($key) ?>"
+                        >
+                        <div class="preview-box" data-preview-box="<?= e($key) ?>" title="Click to enlarge">
+                            <span class="placeholder-text">No Image</span>
+                            <img alt="<?= e($meta['label']) ?>">
+                        </div>
+                        <div class="preview-filename" data-filename="<?= e($key) ?>"></div>
+                        <div style="margin-top:6px;font-size:.52rem;color:#77849b;line-height:1.05rem;">
+                            <?= $meta['required'] ? 'Must provide this view.' : 'Optional view.' ?><br>
+                            JPG / PNG up to 6MB.
+                        </div>
+                    </div>
+                <?php endforeach; ?>
+            </div>
+
+            <!-- Note: Damage/Deduction inputs removed for staff. Admin handles deposit deductions. -->
+
+            <div class="field" style="margin-top:24px;">
+                <label>Remarks (overall inspection)</label>
+                <textarea name="remarks" placeholder="Describe condition, damages, accessories, cleanliness, etc."></textarea>
+            </div>
+
+            <button type="submit" class="submit-btn">Submit Inspection</button>
+        </form>
+    <?php endif; ?>
+</div>
+
+<!-- Modal -->
+<div id="imgModal">
+    <button type="button" class="close-btn" id="closeModalBtn">Close (Esc)</button>
+    <img id="modalImg" src="" alt="Full Image">
+</div>
+
+<script>
+/* Image previews */
+document.addEventListener('change', function(e){
+    if (e.target.matches('input[type=file][data-slot]')) {
+        const file = e.target.files[0];
+        const slot = e.target.getAttribute('data-slot');
+        const box = document.querySelector('[data-preview-box="'+slot+'"]');
+        const img = box ? box.querySelector('img') : null;
+        const placeholder = box ? box.querySelector('.placeholder-text') : null;
+        const fnLabel = document.querySelector('[data-filename="'+slot+'"]');
+        const max = 6 * 1024 * 1024;
+
+        if (!file) {
+            if (box) {
+                box.classList.remove('has-image');
+                box.removeAttribute('data-full');
+                if (placeholder) placeholder.style.display='block';
+                if (img) img.style.display='none';
+            }
+            if (fnLabel) fnLabel.textContent = '';
+            return;
+        }
+        if (file.size > max) {
+            alert('File exceeds 6MB limit.');
+            e.target.value = '';
+            if (box) {
+                box.classList.remove('has-image');
+                box.removeAttribute('data-full');
+                if (placeholder) placeholder.style.display='block';
+                if (img) img.style.display='none';
+            }
+            if (fnLabel) fnLabel.textContent = '';
+            return;
+        }
+
+        const reader = new FileReader();
+        reader.onload = function(ev){
+            if (box && img) {
+                img.src = ev.target.result;
+                box.classList.add('has-image');
+                box.setAttribute('data-full', ev.target.result);
+                if (placeholder) placeholder.style.display='none';
+                img.style.display='block';
+            }
+        };
+        reader.readAsDataURL(file);
+
+        if (fnLabel) {
+            fnLabel.textContent = file.name + ' (' + Math.round(file.size/1024) + ' KB)';
+        }
+    }
+});
+
+/* Modal viewer for thumbnails and previews */
+(function(){
+    const modal = document.getElementById('imgModal');
+    const modalImg = document.getElementById('modalImg');
+    const closeBtn = document.getElementById('closeModalBtn');
+
+    function openModal(src){
+        if (!src) return;
+        modalImg.src = src;
+        modal.style.display='flex';
+    }
+    function closeModal(){
+        modal.style.display='none';
+        modalImg.src='';
+    }
+
+    document.addEventListener('click', e=>{
+        if (e.target.closest('.preview-box')) {
+            const box = e.target.closest('.preview-box');
+            const full = box.getAttribute('data-full');
+            if (full) openModal(full);
+        } else if (e.target === modal || e.target === closeBtn) {
+            closeModal();
+        }
+    });
+
+    document.addEventListener('keyup', e=>{
+        if (e.key === 'Escape' && modal.style.display==='flex') {
+            closeModal();
+        }
+    });
+})();
+</script>
+
+<?php include '../includes/footer.php'; ?>

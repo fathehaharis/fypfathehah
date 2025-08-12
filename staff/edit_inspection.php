@@ -8,141 +8,67 @@ session_start();
 require_once '../connect.php';
 date_default_timezone_set('Asia/Kuala_Lumpur');
 
-if (empty($_SESSION['admin_id'])) {
-    header("Location: admin_login.php");
+if (empty($_SESSION['staff_id'])) {
+    header("Location: delivery_staff_login.php");
     exit;
 }
+
+$staff_id   = (int)$_SESSION['staff_id'];
 
 function e($s): string { return htmlspecialchars((string)($s ?? ''), ENT_QUOTES, 'UTF-8'); }
 
 /* CSRF */
-if (empty($_SESSION['csrf_token'])) {
-    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+if (empty($_SESSION['staff_csrf'])) {
+    $_SESSION['staff_csrf'] = bin2hex(random_bytes(32));
 }
-$csrf_token = $_SESSION['csrf_token'];
+$csrf_token = $_SESSION['staff_csrf'];
 function verify_csrf(): bool {
-    return isset($_POST['csrf_token'], $_SESSION['csrf_token']) &&
-        hash_equals($_SESSION['csrf_token'], $_POST['csrf_token']);
-}
-
-/**
- * Upsert security deposit refund (reference_code = DEP-{booking_id})
- * Matches your refunds table schema.
- */
-function upsert_deposit_refund(
-    mysqli $conn,
-    int $booking_id,
-    int $cust_id,
-    float $originalDeposit,
-    float $deduction,
-    float $refundable,
-    string $damageDesc
-): void {
-    $refCode = 'DEP-' . $booking_id;
-
-    // If forfeited (refundable 0) cancel any pending/failed deposit refund rows
-    if ($refundable <= 0.00001) {
-        $upd = $conn->prepare("
-            UPDATE refunds
-               SET refund_status='cancelled',
-                   notes='Deposit forfeited',
-                   user_unread=1
-             WHERE booking_id=? AND reference_code=? AND refund_status IN ('pending','failed')
-        ");
-        $upd->bind_param('is', $booking_id, $refCode);
-        $upd->execute();
-        $upd->close();
-        return;
-    }
-
-    $refundRate  = $originalDeposit > 0 ? $refundable / $originalDeposit : 0.0;
-    $base_amount = $originalDeposit;
-    $notes = $deduction > 0
-        ? 'Security Deposit Refund after deduction RM '.number_format($deduction,2)
-        : 'Security Deposit Refund';
-    if ($damageDesc && $deduction > 0) {
-        $notes .= ' - ' . mb_substr($damageDesc, 0, 100);
-    }
-
-    $sel = $conn->prepare("
-        SELECT refund_id, refund_status
-          FROM refunds
-         WHERE booking_id=? AND reference_code=?
-         LIMIT 1
-    ");
-    $sel->bind_param('is', $booking_id, $refCode);
-    $sel->execute();
-    $existing = $sel->get_result()->fetch_assoc();
-    $sel->close();
-
-    if ($existing) {
-        if ($existing['refund_status'] === 'processed') {
-            // Do not alter processed refund
-            return;
-        }
-        $upd = $conn->prepare("
-            UPDATE refunds
-               SET amount=?,
-                   refund_status='pending',
-                   notes=?,
-                   refund_rate=?,
-                   base_amount=?,
-                   user_unread=1
-             WHERE refund_id=?
-        ");
-        $upd->bind_param(
-            'dsddi',
-            $refundable,
-            $notes,
-            $refundRate,
-            $base_amount,
-            $existing['refund_id']
-        );
-        $upd->execute();
-        $upd->close();
-    } else {
-        $ins = $conn->prepare("
-            INSERT INTO refunds
-                (booking_id, cust_id, amount, refund_status, reference_code, notes,
-                 refund_rate, base_amount, created_at, user_unread)
-            VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, NOW(), 1)
-        ");
-        // types: i (booking_id), i (cust_id), d (amount), s (reference_code), s (notes), d (refund_rate), d (base_amount)
-        $ins->bind_param(
-            'iidssdd',
-            $booking_id,
-            $cust_id,
-            $refundable,
-            $refCode,
-            $notes,
-            $refundRate,
-            $base_amount
-        );
-        $ins->execute();
-        $ins->close();
-    }
+    return isset($_POST['csrf_token'], $_SESSION['staff_csrf']) &&
+        hash_equals($_SESSION['staff_csrf'], $_POST['csrf_token']);
 }
 
 /* Inputs */
 $booking_id = isset($_GET['booking_id']) && ctype_digit($_GET['booking_id'])
     ? (int)$_GET['booking_id'] : 0;
+
 $allowed_types = ['pickup','return'];
 $type = isset($_GET['type']) && in_array(strtolower($_GET['type']), $allowed_types, true)
     ? strtolower($_GET['type']) : 'pickup';
 
 if ($booking_id <= 0) {
     echo "Invalid booking ID.";
+    include '../includes/footer.php';
     exit;
 }
 
-/* Fetch booking (with deposit fields + customer for refunds) */
+/* Authorization: ensure this staff is assigned to this booking */
+$authStmt = $conn->prepare("
+    SELECT s.service_id, s.service_type
+      FROM service s
+     WHERE s.booking_id = ? AND s.staff_id = ?
+     ORDER BY s.service_id DESC
+     LIMIT 1
+");
+$authStmt->bind_param("ii", $booking_id, $staff_id);
+$authStmt->execute();
+$authRow = $authStmt->get_result()->fetch_assoc();
+$authStmt->close();
+
+if (!$authRow) {
+    http_response_code(403);
+    echo "Access denied. You are not assigned to this booking.";
+    include '../includes/footer.php';
+    exit;
+}
+$service_id = (int)$authRow['service_id'];
+$service_type = (string)$authRow['service_type'];
+
+/* Fetch booking */
 $stmt = $conn->prepare("
     SELECT b.*,
-           c.car_brand, c.car_model, c.plate_no, c.mileage AS car_mileage, c.car_id,
-           cust.cust_id
+           c.car_brand, c.car_model, c.plate_no, c.mileage AS car_mileage, c.car_id
       FROM booking b
       JOIN car c ON b.car_id = c.car_id
- LEFT JOIN customer cust ON b.cust_id = cust.cust_id
      WHERE b.booking_id = ?
      LIMIT 1
 ");
@@ -153,14 +79,14 @@ $stmt->close();
 
 if (!$booking) {
     echo "Booking not found.";
+    include '../includes/footer.php';
     exit;
 }
 
 $car_id = (int)$booking['car_id'];
 $current_car_mileage = (int)$booking['car_mileage'];
-$cust_id = (int)($booking['cust_id'] ?? 0);
 
-/* Slot definitions */
+/* Slot definitions (must match inspection_add) */
 $slot_definitions = [
     'car_front'       => ['label'=>'Car Front',       'required'=>true],
     'car_back'        => ['label'=>'Car Back',        'required'=>true],
@@ -199,43 +125,16 @@ if ($type === 'pickup') {
     $existing_remarks = $booking['return_inspection_remarks'] ?? '';
 }
 
-/* Existing deposit data (return only) */
-$original_deposit       = (float)($booking['security_deposit'] ?? 0);
-$current_deduction      = (float)($booking['security_deposit_deduction'] ?? 0);
-$current_refund         = (float)($booking['security_deposit_refund'] ?? max($original_deposit - $current_deduction, 0));
-$current_deposit_status = (string)($booking['deposit_status'] ?? 'held');
-$current_damage_desc    = (string)($booking['deposit_damage_description'] ?? '');
-
-/* Check if existing deposit refund is processed (lock editing damage if so) */
-$deposit_locked = false;
-$refund_row = null;
-if ($type === 'return') {
-    $refStmt = $conn->prepare("
-        SELECT refund_id, refund_status
-          FROM refunds
-         WHERE booking_id=? AND reference_code=?
-         LIMIT 1
-    ");
-    $refCode = 'DEP-' . $booking_id;
-    $refStmt->bind_param('is', $booking_id, $refCode);
-    $refStmt->execute();
-    $refund_row = $refStmt->get_result()->fetch_assoc();
-    $refStmt->close();
-    if ($refund_row && $refund_row['refund_status'] === 'processed') {
-        $deposit_locked = true; // cannot change deduction after processed
-    }
-}
-
-/* Inspection date input default */
+/* Inspection date default */
 $inspection_date_display = $images ? ($images[0]['inspection_date'] ?? '') : '';
 $default_inspection_dt_input = $inspection_date_display
     ? str_replace(' ', 'T', substr($inspection_date_display, 0, 16))
     : date('Y-m-d\TH:i');
 
 $errors = [];
-$success = null;
+$flash = null;
 
-/* POST (Edit) */
+/* POST: edit */
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!verify_csrf()) {
         $errors[] = "Invalid session token.";
@@ -258,34 +157,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $errors[] = "Return mileage cannot be less than pickup mileage (".(int)$booking['pickup_mileage'].").";
         }
 
-        /* Damage (only for return & if not locked) */
-        $new_damage_amount = $current_deduction;
-        $new_damage_desc   = $current_damage_desc;
-        if ($type === 'return' && !$deposit_locked) {
-            $damage_amount_raw = $_POST['damage_amount'] ?? (string)$current_deduction;
-            $damage_desc_raw   = trim($_POST['damage_description'] ?? $current_damage_desc);
-
-            if ($damage_amount_raw === '' || !is_numeric($damage_amount_raw)) {
-                $errors[] = "Damage amount must be numeric.";
-            } else {
-                $new_damage_amount = round((float)$damage_amount_raw, 2);
-                if ($new_damage_amount < 0) {
-                    $errors[] = "Damage amount cannot be negative.";
-                    $new_damage_amount = $current_deduction;
-                }
-                if ($new_damage_amount > $original_deposit) {
-                    // Cap to deposit
-                    $new_damage_amount = $original_deposit;
-                }
-                if ($new_damage_amount > 0 && $damage_desc_raw === '') {
-                    $errors[] = "Provide damage description when damage amount > 0.";
-                } else {
-                    $new_damage_desc = $new_damage_amount > 0 ? $damage_desc_raw : '';
-                }
-            }
-        }
-
-        /* Files validation (only ensure required present if currently missing) */
+        /* Required images must remain present after edit */
         $allowed_mime = ['image/jpeg','image/png','image/jpg'];
         $max_size = 6 * 1024 * 1024;
         foreach ($slot_definitions as $key => $meta) {
@@ -299,15 +171,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!$errors) {
             $conn->begin_transaction();
             try {
-                /* Update booking core */
+                /* Update booking core fields */
                 if ($type === 'pickup') {
                     $stmt = $conn->prepare("
                         UPDATE booking
                            SET pickup_mileage=?,
                                pickup_fuel_percent=?,
                                updated_at=NOW()
-                         WHERE booking_id=?
-                    ");
+                         WHERE booking_id=?");
                     $stmt->bind_param('iii', $mileage, $fuel_percent, $booking_id);
                     $stmt->execute();
                     $stmt->close();
@@ -317,8 +188,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             UPDATE booking
                                SET pickup_inspection_remarks=?,
                                    updated_at=NOW()
-                             WHERE booking_id=?
-                        ");
+                             WHERE booking_id=?");
                         $stmt->bind_param('si', $remarks, $booking_id);
                         $stmt->execute();
                         $stmt->close();
@@ -329,8 +199,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                            SET return_mileage=?,
                                return_fuel_percent=?,
                                updated_at=NOW()
-                         WHERE booking_id=?
-                    ");
+                         WHERE booking_id=?");
                     $stmt->bind_param('iii', $mileage, $fuel_percent, $booking_id);
                     $stmt->execute();
                     $stmt->close();
@@ -340,8 +209,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             UPDATE booking
                                SET return_inspection_remarks=?,
                                    updated_at=NOW()
-                             WHERE booking_id=?
-                        ");
+                             WHERE booking_id=?");
                         $stmt->bind_param('si', $remarks, $booking_id);
                         $stmt->execute();
                         $stmt->close();
@@ -356,7 +224,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $stmt->close();
                 }
 
-                /* Images replacement */
+                /* Images replacement per slot */
                 foreach ($slot_definitions as $key => $meta) {
                     if (empty($_FILES['images']['name'][$key])) continue;
 
@@ -392,51 +260,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 (booking_id, image_path, image_type, capture_type, inspection_date, uploaded_at)
                             VALUES (?,?,?,?,?,NOW())
                         ");
-                        $ins->bind_param('ibsss', $booking_id, $blob, $key, $type, $inspection_date_sql);
+                        $ins->bind_param('ibsss',
+                            $booking_id,
+                            $blob,
+                            $key,
+                            $type,
+                            $inspection_date_sql
+                        );
                         $ins->send_long_data(1, $blob);
                         $ins->execute();
                         $ins->close();
                     }
                 }
 
-                /* Deposit update if return & not locked */
-                if ($type === 'return' && !$deposit_locked) {
-                    $deduction  = $new_damage_amount;
-                    $refundable = max($original_deposit - $deduction, 0);
-
-                    $new_status = ($deduction >= $original_deposit && $original_deposit > 0)
-                        ? 'forfeited'
-                        : 'pending_refund';
-
-                    $stmt = $conn->prepare("
-                        UPDATE booking
-                           SET security_deposit_deduction=?,
-                               security_deposit_refund=?,
-                               deposit_status=?,
-                               deposit_damage_description=?,
-                               deposit_last_adjusted_at=NOW(),
-                               updated_at=NOW()
-                         WHERE booking_id=?
-                    ");
-                    $stmt->bind_param('ddssi', $deduction, $refundable, $new_status, $new_damage_desc, $booking_id);
-                    $stmt->execute();
-                    $stmt->close();
-
-                    if ($cust_id > 0) {
-                        upsert_deposit_refund(
-                            $conn,
-                            $booking_id,
-                            $cust_id,
-                            $original_deposit,
-                            $deduction,
-                            $refundable,
-                            $new_damage_desc
-                        );
-                    }
-                }
-
                 $conn->commit();
-                $_SESSION['success'] = ucfirst($type)." inspection updated.";
+                $_SESSION['success'] = ucfirst($type) . " inspection updated.";
                 header("Location: inspection_add.php?booking_id=".$booking_id."&type=".$type);
                 exit;
 
@@ -448,7 +286,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-include 'admin_header.php';
+include 'staff_header.php';
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -503,15 +341,6 @@ h1 { margin:0 0 8px; font-size:1.55em; color:#27345d; font-weight:800; }
 .btn-secondary:hover { background:#cfd6e2; }
 .btn:active { transform:translateY(1px); }
 
-.damage-panel { margin-top:30px; padding:18px 20px; border:1.5px solid #d9e2ef; background:#f6f9fe; border-radius:14px; }
-.damage-panel h3 { margin:0 0 12px; font-size:.95em; font-weight:800; color:#27375f; letter-spacing:.5px; }
-.damage-grid { display:flex; flex-wrap:wrap; gap:16px; }
-.damage-grid .field { flex:1 1 220px; }
-.refund-summary { margin-top:12px; font-size:.7rem; color:#39506d; }
-.refund-summary strong { color:#1d3355; }
-
-.lock-note { background:#fff6d8; border:1px solid #f2d78a; padding:10px 14px; border-radius:8px; font-size:.65rem; font-weight:600; color:#8a6d00; margin-top:10px; }
-
 .back-link {
   position:absolute; top:10px; right:16px;
   background:#e0e6ef; color:#24324d; text-decoration:none;
@@ -539,10 +368,7 @@ h1 { margin:0 0 8px; font-size:1.55em; color:#27345d; font-weight:800; }
     <a class="back-link" href="inspection_add.php?booking_id=<?= e($booking_id) ?>&type=<?= e($type) ?>">&#8592; Back</a>
     <h1>Edit <?= e(ucfirst($type)) ?> Inspection (Booking #<?= e($booking_id) ?>)</h1>
     <div class="sub-note">
-        Replace only the images you need. Required slots must retain an image.
-        <?php if ($type === 'return'): ?>
-            Damage deduction editing is provided below (if refund not processed).
-        <?php endif; ?>
+        Replace only the images you need. Required slots must retain an image. Deposit/refund changes are admin-only.
     </div>
 
     <?php if ($errors): ?>
@@ -617,63 +443,6 @@ h1 { margin:0 0 8px; font-size:1.55em; color:#27345d; font-weight:800; }
             </div>
             <?php endforeach; ?>
         </div>
-
-        <?php if ($type === 'return'): ?>
-            <div class="damage-panel">
-                <h3>Security Deposit Damage Deduction</h3>
-                <?php if ($deposit_locked): ?>
-                    <div class="lock-note">
-                        Deposit refund already processed. Damage deduction is locked (view only).
-                    </div>
-                <?php endif; ?>
-                <div class="damage-grid">
-                    <div class="field" style="max-width:220px;">
-                        <label>Original Deposit (RM)</label>
-                        <input type="text" id="origDeposit" value="<?= number_format($original_deposit,2) ?>" disabled>
-                    </div>
-                    <div class="field" style="max-width:220px;">
-                        <label>Current Deduction (RM)</label>
-                        <input
-                            type="number"
-                            name="damage_amount"
-                            id="damageAmount"
-                            step="0.01" min="0"
-                            value="<?= number_format($current_deduction,2,'.','') ?>"
-                            <?= $deposit_locked ? 'disabled' : '' ?>
-                        >
-                    </div>
-                    <div class="field" style="flex:1 1 300px;">
-                        <label>Damage Description</label>
-                        <textarea
-                            name="damage_description"
-                            id="damageDescription"
-                            placeholder="Describe damage..."
-                            <?= $deposit_locked ? 'disabled data-locked="1"' : '' ?>
-                        ><?= e($current_damage_desc) ?></textarea>
-                    </div>
-                    <div class="field" style="max-width:220px;">
-                        <label>Current Refundable (RM)</label>
-                        <input type="text" id="refundEstimate" value="<?= number_format($current_refund,2) ?>" disabled>
-                    </div>
-                    <div class="field" style="max-width:220px;">
-                        <label>Deposit Status</label>
-                        <input type="text" value="<?= e($current_deposit_status) ?>" disabled>
-                    </div>
-                </div>
-                <div class="refund-summary" id="forfeitNote" style="<?= ($current_deduction >= $original_deposit && $original_deposit>0)?'':'display:none;' ?>">
-                    <strong>Note:</strong> Deduction equals / exceeds deposit → deposit forfeited (no refund).
-                </div>
-                <?php if ($deposit_locked): ?>
-                    <div style="margin-top:10px;font-size:.65rem;color:#5a6474;">
-                        To adjust deposit after processing, create a manual adjustment via finance (if policy permits).
-                    </div>
-                <?php else: ?>
-                    <div style="margin-top:10px;font-size:.65rem;color:#5a6474;">
-                        Set deduction to 0 for full refund. Increasing will reduce refundable amount.
-                    </div>
-                <?php endif; ?>
-            </div>
-        <?php endif; ?>
 
         <div class="field" style="margin-top:26px;">
             <label>Remarks (overall inspection)</label>
@@ -781,52 +550,6 @@ h1 { margin:0 0 8px; font-size:1.55em; color:#27345d; font-weight:800; }
   document.addEventListener('keyup', e=>{
     if (e.key === 'Escape' && modal.style.display==='flex') closeModal();
   });
-
-  /* Damage panel dynamic (return only) */
-  const dmgInput  = document.getElementById('damageAmount');
-  const dmgDesc   = document.getElementById('damageDescription');
-  const refundEst = document.getElementById('refundEstimate');
-  const origEl    = document.getElementById('origDeposit');
-  const forfeit   = document.getElementById('forfeitNote');
-
-  if (dmgInput && dmgDesc && refundEst && origEl) {
-    // If disabled due to processed refund, mark so JS won't override
-    if (dmgDesc.disabled) {
-      dmgDesc.setAttribute('data-locked', '1');
-    }
-    function parseMoneyInput(el) {
-      const raw = (el.value || '').toString().replace(/,/g,'').trim();
-      const n = parseFloat(raw);
-      return isNaN(n) ? 0 : n;
-    }
-    function recalc(){
-      const orig = parseMoneyInput(origEl);
-      let v = parseMoneyInput(dmgInput);
-      if (v < 0) v = 0;
-
-      // Enable/disable description only if not locked by server
-      if (!dmgDesc.hasAttribute('data-locked')) {
-        if (v > 0) {
-          dmgDesc.disabled = false;
-          dmgDesc.style.background = '#ffffff';
-        } else {
-          dmgDesc.disabled = true;
-          dmgDesc.style.background = '#f0f3f7';
-          dmgDesc.value = '';
-        }
-      }
-
-      const capped = Math.min(v, orig);
-      refundEst.value = (orig - capped).toFixed(2);
-
-      if (forfeit) {
-        if (orig > 0 && v >= orig) forfeit.style.display = 'block';
-        else forfeit.style.display = 'none';
-      }
-    }
-    dmgInput.addEventListener('input', recalc);
-    recalc();
-  }
 })();
 </script>
 <?php include '../includes/footer.php'; ?>
