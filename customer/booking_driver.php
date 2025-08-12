@@ -13,7 +13,6 @@ if (empty($_SESSION['booking_data'])) {
 
 include '../connect.php';
 
-
 $cust_id  = (int)$_SESSION['cust_id'];
 $booking  = $_SESSION['booking_data']; // car_id, pickup_datetime, return_datetime, etc.
 $errors   = [];
@@ -108,28 +107,67 @@ if (empty($errors) && $car) {
     $_SESSION['booking_data']['provisional_amount'] = $provisional_amount;
 }
 
-// If user presses Proceed and no errors => go to guarantor
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($errors)) {
-    header("Location: booking_guarantor.php");
-    exit;
-}
-
-// Fetch customer (driver) data (unchanged)
+/* -------------------- Fetch customer (driver) data + profile status -------------------- */
 $stmt = $conn->prepare("
     SELECT full_name, phone_no, email, id_no, address, age,
            id_front_image, id_back_image,
-           license_front_image, license_back_image
+           license_front_image, license_back_image,
+           selfie_with_id_image,
+           profile_status
     FROM customer
     WHERE cust_id = ?
+    LIMIT 1
 ");
 $stmt->bind_param("i", $cust_id);
 $stmt->execute();
 $stmt->bind_result(
     $full_name,$phone_no,$email,$id_no,$address,$age,
-    $id_front,$id_back,$lic_front,$lic_back
+    $id_front,$id_back,$lic_front,$lic_back,$selfie_with_id,$profile_status
 );
 $stmt->fetch();
 $stmt->close();
+
+/* -------------------- Build verification warnings/blocks -------------------- */
+$notVerifiedStatuses = ['unsubmitted','pending','pending_reverification','rejected'];
+$profileNotVerified  = in_array((string)$profile_status, $notVerifiedStatuses, true);
+
+// Determine missing required images
+$missingDocs = [];
+if (empty($id_front))      $missingDocs[] = 'ID Front';
+if (empty($id_back))       $missingDocs[] = 'ID Back';
+if (empty($lic_front))     $missingDocs[] = 'License Front';
+if (empty($lic_back))      $missingDocs[] = 'License Back';
+if (empty($selfie_with_id))$missingDocs[] = 'Selfie with ID';
+
+function statusWarningText(string $status, array $missingDocs): string {
+    $base = match($status) {
+        'unsubmitted'            => "Your profile has not been submitted for verification.",
+        'pending'                => "Your profile is pending verification.",
+        'pending_reverification' => "Your profile changes are pending re‑verification.",
+        'rejected'               => "Your profile verification was rejected. Please update your documents and resubmit.",
+        default                  => "Your profile is not ready for booking."
+    };
+    if (!empty($missingDocs)) {
+        $base .= " Missing required documents: " . implode(', ', $missingDocs) . ".";
+    }
+    $base .= " Please complete your verification before proceeding.";
+    return $base;
+}
+
+$verificationWarning = '';
+if ($profileNotVerified) {
+    $verificationWarning = statusWarningText((string)$profile_status, $missingDocs);
+}
+
+// If user presses Proceed and no other errors => block if not verified
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($errors)) {
+    if ($profileNotVerified) {
+        $errors[] = $verificationWarning ?: "Please complete your profile verification before proceeding.";
+    } else {
+        header("Location: booking_guarantor.php");
+        exit;
+    }
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -217,6 +255,15 @@ body { background:#eceef4; }
     font-size:.85em;
     margin:0 0 18px;
 }
+.warn-box {
+    background:#fff9e1;
+    border:1px solid #f2e2a3;
+    color:#6a5200;
+    padding:10px 14px;
+    border-radius:10px;
+    font-size:.85em;
+    margin:0 0 18px;
+}
 .btn-row {
     margin-top:12px;
     display:flex;
@@ -283,9 +330,15 @@ body { background:#eceef4; }
                 </div>
             </div>
         <?php else: ?>
-            <div class="note-box">
-                Review your stored details. If something is wrong, click "Edit Profile" before proceeding.
-            </div>
+            <?php if ($profileNotVerified): ?>
+                <div class="warn-box" role="alert">
+                    <?= htmlspecialchars($verificationWarning) ?>
+                </div>
+            <?php else: ?>
+                <div class="note-box">
+                    Review your details.
+                </div>
+            <?php endif; ?>
         <?php endif; ?>
 
         <div class="info-row">
@@ -325,7 +378,6 @@ body { background:#eceef4; }
 
         <div class="btn-row">
             <a href="book_car.php?car_id=<?= (int)$car_id ?>" class="back-btn">Back</a>
-            <a href="profile.php" class="edit-btn">Edit Profile</a>
         </div>
     </div>
 
@@ -363,7 +415,16 @@ body { background:#eceef4; }
             <?php else: ?><div class="no-img">Not Uploaded</div><?php endif; ?>
         </div>
 
-        <form method="POST" class="btn-row">
+        <div class="info-row" style="margin-top:20px;margin-bottom:4px;">
+            <span class="info-label">Selfie with ID</span>
+        </div>
+        <div class="img-slot">
+            <?php if (!empty($selfie_with_id)): ?>
+                <img src="get_id_image.php?type=selfie_with_id&cust_id=<?= $cust_id ?>" alt="Selfie with ID">
+            <?php else: ?><div class="no-img">Not Uploaded</div><?php endif; ?>
+        </div>
+
+        <form method="POST" class="btn-row" id="proceedForm">
             <button type="submit" class="next-btn" <?= !empty($errors) ? 'disabled style="background:#9aa9c9;cursor:not-allowed;"' : '' ?>>
                 Proceed (Guarantor)
             </button>
@@ -372,5 +433,24 @@ body { background:#eceef4; }
 </div>
 
 <?php include '../includes/footer.php'; ?>
+<script>
+(function(){
+    // Client-side guard for immediate feedback when profile isn't verified
+    const profileStatus = <?= json_encode((string)$profile_status) ?>;
+    const notVerifiedStatuses = ['unsubmitted','pending','pending_reverification','rejected'];
+    const mustBlock = notVerifiedStatuses.includes(profileStatus);
+    const warningMsg = <?= json_encode($verificationWarning ?: "Please complete your profile verification (and upload all required documents) before proceeding.") ?>;
+
+    if (mustBlock) {
+        const form = document.getElementById('proceedForm');
+        if (form) {
+            form.addEventListener('submit', function(e){
+                e.preventDefault();
+                alert(warningMsg);
+            });
+        }
+    }
+})();
+</script>
 </body>
 </html>

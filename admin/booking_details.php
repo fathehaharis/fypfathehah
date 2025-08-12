@@ -238,7 +238,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                             $pickup = $booking['pickup_datetime'] ? date('d M Y, g:i A', strtotime($booking['pickup_datetime'])) : '-';
                             $return = $booking['return_datetime'] ? date('d M Y, g:i A', strtotime($booking['return_datetime'])) : '-';
-                            $car    = trim(($booking['car_brand'] ?? '') . ' ' . ($booking['car_model'] ?? '') . ' (' . ($booking['plate_no'] ?? '-') . ')');
+                            $car    = trim(($booking['car_brand'] ?? '') . ' ' . ($booking['car_model'] ?? ''));
 
                             $subject = "Your Booking #{$booking_id} is Approved – Next Step: Payment";
                             $html = "
@@ -289,7 +289,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $toName  = (string)($booking['customer_name'] ?? 'Customer');
                     if ($toEmail !== '') {
                         $pickup = $booking['pickup_datetime'] ? date('d M Y, g:i A', strtotime($booking['pickup_datetime'])) : '-';
-                        $car    = trim(($booking['car_brand'] ?? '') . ' ' . ($booking['car_model'] ?? '') . ' (' . ($booking['plate_no'] ?? '-') . ')');
+                            $car    = trim(($booking['car_brand'] ?? '') . ' ' . ($booking['car_model'] ?? ''));
 
                         $subject = "Your Booking #{$booking_id} was Rejected";
                         $html = "
@@ -704,7 +704,6 @@ body { background:#eceef4; font-family:'Inter',Arial,sans-serif; margin:0; }
                 <?= e($booking['car_brand'].' '.$booking['car_model']) ?>
             </td>
         </tr>
-        <tr><th>Plate No</th><td><?= e($booking['plate_no']) ?></td></tr>
         <tr><th>Day Count</th><td><?= $day_count ?> day(s)</td></tr>
         <tr><th>Daily Rate (Snapshot)</th><td>RM <?= number_format($daily_rate,2) ?></td></tr>
         <tr><th>Pickup</th><td><?= e($booking['pickup_datetime']) ?></td></tr>

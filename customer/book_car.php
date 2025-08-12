@@ -19,6 +19,7 @@ $errors = [];
   - User chooses: Pickup Date + Pickup Time + Return Date (time auto-locked to same pickup time).
   - Return Date must be at least 1 day AFTER pickup date (minimum 24h rental).
   - Stored datetimes keep the same time segment (e.g., 2025-08-20 19:00:00 to 2025-08-23 19:00:00).
+  - Additional: If now is 7pm, earliest selectable pickup time today is 8pm (rounded up to next full hour).
 */
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -58,9 +59,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $pickup_dt = new DateTime($pickup_datetime);
             $return_dt = new DateTime($return_datetime);
             $now       = new DateTime();
+            $minLead   = (clone $now)->modify('+1 hour'); // Enforce at least next full hour
 
-            if ($pickup_dt < $now) {
-                $errors[] = "Pickup date/time must be in the future.";
+            if ($pickup_dt < $minLead) {
+                $errors[] = "Pickup must be at least 1 hour from now.";
             }
             // Must be at least 1 day rental
             if ($return_dt <= $pickup_dt || $return_dt->diff($pickup_dt)->days < 1) {
@@ -167,6 +169,23 @@ $return_loc_pref    = $booking_data['return_location'] ?? '';
 $current_datetime = new DateTime();
 $current_date = $current_datetime->format('Y-m-d');
 $current_time = $current_datetime->format('H:i');
+
+// Compute the earliest selectable time TODAY: next full hour
+$leadMinutes = 60; // enforce at least one hour
+$next = (clone $current_datetime)->modify("+{$leadMinutes} minutes");
+$minute = (int)$next->format('i');
+if ($minute === 0) {
+    // already on :00
+} elseif ($minute <= 30) {
+    $next->setTime((int)$next->format('H'), 30, 0);
+} else {
+    // past :30 -> move to next hour :00
+    $next->modify('+1 hour')->setTime((int)$next->format('H'), 0, 0);
+}
+
+$min_time_today = $next->format('H:i');
+$min_time_date  = $next->format('Y-m-d');
+$cutoffRolledToTomorrow = ($min_time_date !== $current_date);
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -237,6 +256,7 @@ input[type="text"], select, textarea {
 textarea { min-height:70px; }
 input[readonly] { background:#f5f7fb; cursor:pointer; }
 .inline-note { font-size:.78em; color:#6b7487; margin-top:4px; }
+.inline-hint { font-size:.78em; color:#6b7487; margin-top:8px; display:none; }
 .required-star { color:#c62828; margin-left:4px; font-weight:700;}
 .service-note {
     background:#f8f4e7; border:1px solid #e3d7b8;
@@ -278,8 +298,6 @@ input[readonly] { background:#f5f7fb; cursor:pointer; }
         </div>
         <table class="car-info-table">
             <tr><th>Brand / Model</th><td><?= htmlspecialchars($car['car_brand'].' '.$car['car_model']) ?></td></tr>
-            <tr><th>Plate No</th><td><?= htmlspecialchars($car['plate_no']) ?></td></tr>
-            <tr><th>Year</th><td><?= htmlspecialchars($car['year']) ?></td></tr>
             <tr><th>Color</th><td><?= htmlspecialchars($car['color']) ?></td></tr>
             <tr><th>Transmission</th><td><?= htmlspecialchars($car['transmission']) ?></td></tr>
             <tr><th>Seat Capacity</th><td><?= htmlspecialchars($car['seat_capacity']) ?></td></tr>
@@ -331,8 +349,8 @@ input[readonly] { background:#f5f7fb; cursor:pointer; }
                                 }
                                 ?>
                             </select>
+                            <div id="time-hint" class="inline-hint"></div>
                         </div>
-                        <div class="inline-note">Pickup must be in the future.</div>
                     </td>
                 </tr>
                 <tr>
@@ -384,6 +402,9 @@ input[readonly] { background:#f5f7fb; cursor:pointer; }
 const unavailableRanges = <?= json_encode($unavailable_ranges) ?>;
 const currentDate = "<?= $current_date ?>";
 const currentTime = "<?= $current_time ?>";
+const minTimeToday = "<?= $min_time_today ?>";
+const minTimeDate  = "<?= $min_time_date ?>"; // date for minTimeToday (could be tomorrow)
+const cutoffRolled = (minTimeDate !== currentDate);
 
 function timeToMinutes(t){
     const [h,m]=t.split(':').map(Number);
@@ -399,6 +420,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const returnRow        = document.getElementById('return_location_row');
     const delTextarea      = document.querySelector('textarea[name="delivery_location"]');
     const retTextarea      = document.querySelector('textarea[name="return_location"]');
+    const timeHintEl       = document.getElementById('time-hint');
 
     const disabledDates = unavailableRanges.map(r => ({from:r.from, to:r.to}));
 
@@ -412,6 +434,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 adjustReturnMin(selected[0]);
                 blockPastTimesIfToday();
                 validateReturnDate();
+                updateTimeHint();
             }
         }
     });
@@ -437,16 +460,53 @@ document.addEventListener('DOMContentLoaded', () => {
         const selectedDate = pickupDateInput.value;
         for (let opt of pickupTimeSelect.options){
             if (!opt.value) continue;
-            if (selectedDate===currentDate && timeToMinutes(opt.value) <= timeToMinutes(currentTime)){
-                opt.disabled=true; opt.style.color='#aaa';
-            } else {
-                opt.disabled=false; opt.style.color='';
+            // Reset first
+            opt.disabled=false; opt.style.color='';
+
+            if (selectedDate === currentDate) {
+                if (cutoffRolled) {
+                    // No slots left today — disable all
+                    opt.disabled = true;
+                    opt.style.color = '#aaa';
+                } else {
+                    // Enforce at least next full hour from now (e.g., if 19:xx => min 20:00)
+                    if (timeToMinutes(opt.value) < timeToMinutes(minTimeToday)) {
+                        opt.disabled = true;
+                        opt.style.color = '#aaa';
+                    }
+                }
             }
         }
+
+        // If current selection is disabled, choose the first available option
         if (pickupTimeSelect.selectedOptions[0]?.disabled){
+            let picked = false;
             for (let o of pickupTimeSelect.options){
-                if (!o.disabled && o.value){ pickupTimeSelect.value=o.value; break; }
+                if (!o.disabled && o.value){
+                    pickupTimeSelect.value=o.value;
+                    picked = true;
+                    break;
+                }
             }
+            if (!picked) {
+                // No time available for today; suggest picking another date
+                pickupTimeSelect.value = '';
+            }
+        }
+    }
+
+    function updateTimeHint(){
+        const selectedDate = pickupDateInput.value;
+        if (selectedDate === currentDate) {
+            timeHintEl.style.display = 'block';
+            if (cutoffRolled) {
+                timeHintEl.textContent = 'No time slots left today. Please choose tomorrow or later.';
+            } else {
+                timeHintEl.textContent = 'Earliest available today: ' + minTimeToday;
+            }
+        } else {
+            timeHintEl.style.display = 'none';
+            timeHintEl.textContent = '';
         }
     }
 
@@ -483,12 +543,13 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     deliveryTypeSel.addEventListener('change',toggleServiceFields);
-    pickupDateInput.addEventListener('change',blockPastTimesIfToday);
+    pickupDateInput.addEventListener('change',()=>{ blockPastTimesIfToday(); updateTimeHint(); });
     pickupTimeSelect.addEventListener('change',blockPastTimesIfToday);
 
     blockPastTimesIfToday();
     toggleServiceFields();
     validateReturnDate();
+    updateTimeHint();
 
     document.getElementById('booking-form').addEventListener('submit',(e)=>{
         if (!pickupDateInput.value || !pickupTimeSelect.value || !returnDateInput.value){
@@ -497,9 +558,10 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
         const pickupDT = new Date(pickupDateInput.value + 'T' + pickupTimeSelect.value + ':00');
-        const now = new Date();
-        if (pickupDT <= now){
-            alert('Pickup must be in the future.');
+        const minPickup = new Date();
+        minPickup.setMinutes(minPickup.getMinutes() + 60); // at least 1 hour from now
+        if (pickupDT < minPickup){
+            alert('Pickup must be at least 1 hour from now.');
             e.preventDefault();
             return;
         }

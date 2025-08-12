@@ -59,6 +59,22 @@ $return_today = fetchScalar(
 );
 
 /* -------------------- Alerts/Notifications -------------------- */
+// 0. Customer profile verifications pending admin review
+$verification_pending_count = fetchScalar(
+    $conn,
+    "SELECT COUNT(*) FROM customer WHERE profile_status IN ('pending','pending_reverification')"
+);
+$verification_alerts = fetchRows(
+    $conn,
+    "SELECT cust_id,
+            COALESCE(NULLIF(full_name,''), username) AS display_name,
+            username, email, profile_status,
+            DATE_FORMAT(profile_status_updated_at,'%Y-%m-%d %H:%i:%s') AS updated_at
+       FROM customer
+      WHERE profile_status IN ('pending','pending_reverification')
+   ORDER BY profile_status_updated_at ASC"
+);
+
 // 1. Bookings that need admin approval: status = 'pending'
 $approval_pending_count = fetchScalar(
     $conn,
@@ -208,6 +224,25 @@ include 'admin_header.php';
     <div class="dashboard-header">
       <span class="welcome-admin">👋 Welcome<?= $admin_name ? ', ' . htmlspecialchars($admin_name) : '' ?>!</span>
     </div>
+
+    <?php if (!empty($verification_alerts)): ?>
+      <div class="alert-box alert-danger">
+        <strong>Action Required:</strong> Customer profiles pending verification
+        <span class="count-badge"><?= (int)$verification_pending_count ?></span>
+        <ul>
+          <?php foreach ($verification_alerts as $c): ?>
+            <li>
+              <strong><?= htmlspecialchars($c['display_name'] ?: $c['username']) ?></strong>
+              <span class="status-chip"><?= htmlspecialchars(str_replace('_',' ', $c['profile_status'])) ?></span>
+              <?php if (!empty($c['updated_at'])): ?>
+                <span style="color:#888;font-size:0.9em;margin-left:8px;">Updated: <?= htmlspecialchars($c['updated_at']) ?></span>
+              <?php endif; ?>
+              <a class="action-btn" href="admin_customer_view.php?cust_id=<?= (int)$c['cust_id'] ?>">Review Profile</a>
+            </li>
+          <?php endforeach; ?>
+        </ul>
+      </div>
+    <?php endif; ?>
 
     <?php if (!empty($approval_alerts)): ?>
       <div class="alert-box alert-danger">

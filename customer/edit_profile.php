@@ -10,9 +10,10 @@ include '../includes/header.php';
 
 $cust_id = (int)$_SESSION['cust_id'];
 
-$success          = false;
-$error            = '';
-$updatedImages    = [];
+$success           = false;
+$error             = '';
+$updatedImages     = [];
+$reverifyTriggered = false;
 
 /* CONFIG */
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -76,8 +77,8 @@ function format_phone_display(?string $digits): string {
 /* ---------- Fetch original record BEFORE POST ---------- */
 $stmt = $conn->prepare(
     "SELECT full_name, phone_no, email, username, id_no,
-            id_front_image, id_back_image, license_front_image, license_back_image,
-            address, age, images_version
+            id_front_image, id_back_image, license_front_image, license_back_image, selfie_with_id_image,
+            address, age, images_version, profile_status, profile_rejection_reason
      FROM customer
      WHERE cust_id=? LIMIT 1"
 );
@@ -93,7 +94,8 @@ if (!$originalUser) {
     exit;
 }
 
-$currentImagesVersion   = (int)$originalUser['images_version'];
+$currentImagesVersion = (int)$originalUser['images_version'];
+$currentStatus        = (string)$originalUser['profile_status'];
 
 /* ---------- Process POST ---------- */
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -144,8 +146,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if (!$error) {
 
-        // Fields to update
-        $fields = [
+        // Fields to update (only if changed)
+        $incoming = [
             'full_name' => $full_name_raw,
             'username'  => $username_raw,
             'email'     => $email,
@@ -155,23 +157,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'age'       => $age
         ];
 
-        $types = '';
-        $params = [];
-        $sets = [];
+        $types       = '';
+        $params      = [];
+        $sets        = [];
+        $changedKeys = [];
 
-        foreach ($fields as $k => $v) {
-            $sets[] = "$k=?";
-            $types .= is_int($v) ? 'i' : 's';
-            $params[] = $v;
+        foreach ($incoming as $k => $v) {
+            $orig = $originalUser[$k] ?? null;
+            // Compare as strings to avoid type noise
+            if ((string)$orig !== (string)$v) {
+                $sets[]   = "$k=?";
+                $types   .= is_int($v) ? 'i' : 's';
+                $params[] = $v;
+                $changedKeys[] = $k;
+            }
         }
 
         // Handle images + detect if any replaced
         $ALLOWED = ['image/jpeg','image/png','image/webp','image/gif'];
         $imageInputs = [
-            'id_front_image'      => 'id_front_image',
-            'id_back_image'       => 'id_back_image',
-            'license_front_image' => 'license_front_image',
-            'license_back_image'  => 'license_back_image'
+            'id_front_image'        => 'id_front_image',
+            'id_back_image'         => 'id_back_image',
+            'license_front_image'   => 'license_front_image',
+            'license_back_image'    => 'license_back_image',
+            'selfie_with_id_image'  => 'selfie_with_id_image'
         ];
 
         foreach ($imageInputs as $input => $col) {
@@ -211,8 +220,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $error = "Could not read $input.";
                 break;
             }
-            $sets[] = "$col=?";
-            $types .= 's';
+            $sets[]   = "$col=?";
+            $types   .= 's';
             $params[] = $blob;
             $updatedImages[] = $input;
         }
@@ -222,6 +231,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($updatedImages) {
                 $sets[] = "images_version = images_version + 1";
                 $sets[] = "images_updated_at = NOW()";
+            }
+
+            // Determine if any changes require re-verification
+            $nonAgeChanges = array_diff($changedKeys, ['age']);
+            $requiresReverify = (!empty($nonAgeChanges) || !empty($updatedImages));
+
+            if ($requiresReverify && in_array($currentStatus, ['verified','rejected'], true)) {
+                // Move account back to re-verification
+                $sets[]   = "profile_status = ?";
+                $types   .= 's';
+                $params[] = 'pending_reverification';
+
+                $sets[] = "profile_status_updated_at = NOW()";
+                $sets[] = "profile_rejection_reason = NULL";
+
+                $reverifyTriggered = true;
             }
 
             if (!$sets) {
@@ -240,6 +265,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     call_user_func_array([$stmt,'bind_param'],$bind);
                     if ($stmt->execute()) {
                         $success = true;
+                        // Update current status in-memory if changed
+                        if ($reverifyTriggered) {
+                            $currentStatus = 'pending_reverification';
+                        }
                     } else {
                         $error = "Update failed: ".$stmt->error;
                     }
@@ -254,8 +283,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     // Re-fetch
     $stmt = $conn->prepare(
         "SELECT full_name, phone_no, email, username, id_no,
-                id_front_image, id_back_image, license_front_image, license_back_image,
-                address, age, images_version
+                id_front_image, id_back_image, license_front_image, license_back_image, selfie_with_id_image,
+                address, age, images_version, profile_status, profile_rejection_reason
          FROM customer WHERE cust_id=? LIMIT 1"
     );
     $stmt->bind_param("i",$cust_id);
@@ -266,6 +295,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($newUser) {
         $originalUser = $newUser;
         $currentImagesVersion = (int)$originalUser['images_version'];
+        $currentStatus        = (string)$originalUser['profile_status'];
     }
 }
 
@@ -313,7 +343,12 @@ $imgBust = '&v=' . $currentImagesVersion;
     <?php if ($success && !$error): ?>
         <div class="success-msg">
             Profile updated successfully!
-            <?php if ($updatedImages): ?><br><span style="font-size:.8em;">Images updated: <?= htmlspecialchars(implode(', ', $updatedImages)) ?> (version <?= $currentImagesVersion ?>)</span><?php endif; ?>
+            <?php if ($updatedImages): ?>
+                <br><span style="font-size:.8em;">Images updated: <?= htmlspecialchars(implode(', ', $updatedImages)) ?> (version <?= $currentImagesVersion ?>)</span>
+            <?php endif; ?>
+            <?php if ($reverifyTriggered): ?>
+                <br><span style="font-size:.85em;color:#1f3f8a;">Your account has been moved to Re‑verification. Our admin will review your changes.</span>
+            <?php endif; ?>
         </div>
     <?php endif; ?>
     <?php if ($error): ?>
@@ -342,7 +377,7 @@ $imgBust = '&v=' . $currentImagesVersion;
         <hr class="separator">
 
         <label>Identity & License Documents (Version <?= $currentImagesVersion ?>)</label>
-        <div class="section-sub">You can update your documents at any time.</div>
+        <div class="section-sub">You can update your documents at any time. Changes to details or documents may trigger re‑verification.</div>
 
         <div class="flex-docs">
             <!-- ID Front -->
@@ -396,6 +431,19 @@ $imgBust = '&v=' . $currentImagesVersion;
                 <img id="preview_license_back_image" class="new-preview" alt="New License Back Preview">
                 <span class="note">Max 5MB</span>
                 <div id="msg_license_back_image" class="inline-warn"></div>
+            </div>
+            <!-- Selfie with ID -->
+            <div class="doc-block">
+                <h4>Selfie with ID</h4>
+                <?php if (!empty($originalUser['selfie_with_id_image'])): ?>
+                    <img src="get_id_image.php?type=selfie_with_id&cust_id=<?= $cust_id . $imgBust ?>" class="current-img" alt="Selfie with ID">
+                <?php else: ?>
+                    <div style="height:110px;border:1px dashed #bcc6d6;border-radius:8px;display:flex;align-items:center;justify-content:center;background:#fff;font-size:.75em;color:#768099;">No Image</div>
+                <?php endif; ?>
+                <input type="file" name="selfie_with_id_image" id="selfie_with_id_image" accept="image/*">
+                <img id="preview_selfie_with_id_image" class="new-preview" alt="New Selfie with ID Preview">
+                <span class="note">Max 5MB</span>
+                <div id="msg_selfie_with_id_image" class="inline-warn"></div>
             </div>
         </div>
 
@@ -515,6 +563,7 @@ setupPreview('id_front_image','preview_id_front_image','msg_id_front_image');
 setupPreview('id_back_image','preview_id_back_image','msg_id_back_image');
 setupPreview('license_front_image','preview_license_front_image','msg_license_front_image');
 setupPreview('license_back_image','preview_license_back_image','msg_license_back_image');
+setupPreview('selfie_with_id_image','preview_selfie_with_id_image','msg_selfie_with_id_image');
 </script>
 
 <?php include '../includes/footer.php'; ?>

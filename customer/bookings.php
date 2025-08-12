@@ -77,7 +77,6 @@ $stmt = $conn->prepare("
         b.status,
         c.car_brand,
         c.car_model,
-        c.plate_no,
         COALESCE(main_img.main_image_id, any_img.any_image_id) AS car_image_id,
         ds.delivery_service_type,
         ds.delivery_service_status,
@@ -342,7 +341,6 @@ document.addEventListener('DOMContentLoaded',()=>{
                                         <span class="badge-delivery" title="Delivery / pickup service selected, fee pending.">Delivery Service</span>
                                     <?php endif; ?>
                                 </td>
-                                <td><?= htmlspecialchars($b['plate_no']) ?></td>
                                 <td><?= htmlspecialchars(date('d M Y, H:i', strtotime($b['pickup_datetime']))) ?></td>
                                 <td><?= htmlspecialchars(date('d M Y, H:i', strtotime($b['return_datetime']))) ?></td>
                                 <td><?= $duration_days ?> day(s)</td>

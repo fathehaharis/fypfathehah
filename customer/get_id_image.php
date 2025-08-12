@@ -11,6 +11,7 @@ $map = [
     'back'           => 'id_back_image',
     'license_front'  => 'license_front_image',
     'license_back'   => 'license_back_image',
+    'selfie_with_id' => 'selfie_with_id_image',
 ];
 
 if ($custId <= 0 || !isset($map[$type])) {
