@@ -130,11 +130,13 @@ if (strcasecmp($car['status'], 'available') !== 0) {
 // Unavailable (confirmed/pending) date ranges (client-side guidance only)
 $today = date("Y-m-d");
 $booking_sql = "
-    SELECT pickup_datetime, return_datetime
-    FROM booking
-    WHERE car_id = ?
-      AND status IN ('confirmed','pending')
-      AND DATE(return_datetime) >= ?
+    SELECT b.pickup_datetime, b.return_datetime
+    FROM booking b
+    JOIN payment p ON b.booking_id = p.booking_id
+    WHERE b.car_id = ?
+      AND b.status IN ('confirmed','pending')
+      AND p.payment_status = 'paid'
+      AND DATE(b.return_datetime) >= ?
 ";
 $booking_stmt = $conn->prepare($booking_sql);
 $booking_stmt->bind_param("is", $car_id, $today);
@@ -301,7 +303,6 @@ input[readonly] { background:#f5f7fb; cursor:pointer; }
             <tr><th>Color</th><td><?= htmlspecialchars($car['color']) ?></td></tr>
             <tr><th>Transmission</th><td><?= htmlspecialchars($car['transmission']) ?></td></tr>
             <tr><th>Seat Capacity</th><td><?= htmlspecialchars($car['seat_capacity']) ?></td></tr>
-            <tr><th>Mileage</th><td><?= htmlspecialchars($car['mileage']) ?> km</td></tr>
             <tr><th>Daily Rate</th><td>RM <?= number_format($car['daily_rate'],2) ?></td></tr>
         </table>
         <div class="inline-note">

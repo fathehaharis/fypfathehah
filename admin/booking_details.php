@@ -661,7 +661,7 @@ body { background:#eceef4; font-family:'Inter',Arial,sans-serif; margin:0; }
         <div class="action-form-row" style="justify-content:space-between;align-items:center;">
             <div style="font-weight:600;color:#344050;">Status: Pending Payment (awaiting customer payment)</div>
         </div>
-    <?php elseif (!in_array($status, ['cancelled','rejected','completed'], true)): ?>
+    <?php elseif (!in_array($status, ['cancelled','rejected'], true)): ?>
         <div class="section-label" style="margin-top:0;">E-Inspection</div>
         <div class="delivery-fee-panel" style="margin-bottom:12px;">
             <a class="readonly-box" style="text-decoration:none;cursor:pointer;background:<?= $pickup_filled ? '#def6e6':'#f3f5f9'; ?>;"
@@ -674,7 +674,7 @@ body { background:#eceef4; font-family:'Inter',Arial,sans-serif; margin:0; }
             </a>
         </div>
     <?php endif; ?>
-
+        
     <!-- Agreement Download Section (always visible) -->
     <div class="agreement-bar">
         <div class="agreement-status <?= $agreement_download_link ? 'available' : 'missing' ?>">
@@ -808,7 +808,44 @@ body { background:#eceef4; font-family:'Inter',Arial,sans-serif; margin:0; }
             </tr>
         <?php endif; ?>
     </table>
+     <div class="section-label">Payments</div>
+<table class="review-table">
+    <tr>
+        <th>Payment Receipts</th>
+        <td>
+            <?php
+            // Fetch all payments for this booking
+            $payStmt = $conn->prepare("SELECT payment_id, payment_date, amount, payment_method, payment_status, receipt_pdf FROM payment WHERE booking_id=? ORDER BY payment_id ASC");
+            $payStmt->bind_param('i', $booking_id);
+            $payStmt->execute();
+            $payments = $payStmt->get_result()->fetch_all(MYSQLI_ASSOC);
+            $payStmt->close();
 
+            if (empty($payments)) {
+                echo '<span style="color:#b32828;">No payment records.</span>';
+            } else {
+                echo '<ul style="padding-left:16px;">';
+                foreach ($payments as $p) {
+                    $has_pdf = !empty($p['receipt_pdf']);
+                    $date = $p['payment_date'] ? date('d M Y, H:i', strtotime($p['payment_date'])) : '-';
+                    $amount = 'RM ' . number_format((float)$p['amount'], 2);
+                    $method = htmlspecialchars($p['payment_method']);
+                    $status = ucfirst($p['payment_status']);
+                    echo '<li style="margin-bottom:7px;">';
+                    echo "[$date] $amount &mdash; $method ($status)";
+                    if ($has_pdf) {
+                        echo ' <a href="../customer/payment_receipt_blob.php?payment_id=' . intval($p['payment_id']) . '" target="_blank" style="margin-left:8px; color:#2377c7; text-decoration:underline; font-weight:600;">View Receipt PDF</a>';
+                    } else {
+                        echo ' <span style="color:#b32828; font-size:.9em;">(No PDF)</span>';
+                    }
+                    echo '</li>';
+                }
+                echo '</ul>';
+            }
+            ?>
+        </td>
+    </tr>
+</table>                       
     <!-- Customer -->
     <div class="section-label">Customer</div>
     <table class="review-table">

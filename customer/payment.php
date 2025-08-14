@@ -7,9 +7,16 @@ error_reporting(E_ALL);
 date_default_timezone_set('Asia/Kuala_Lumpur');
 
 include '../connect.php';
-require '../vendor/autoload.php'; // PHPMailer
+require_once '../vendor/autoload.php'; // Loads PHPMailer and mPDF
 use PHPMailer\PHPMailer\PHPMailer;
 use PHPMailer\PHPMailer\Exception;
+use Mpdf\Mpdf;
+
+// CSRF protection
+if (empty($_SESSION['csrf_token'])) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
+$csrf_token = $_SESSION['csrf_token'];
 
 // Resolve booking_id from POST or GET
 $booking_id = null;
@@ -68,12 +75,15 @@ if (in_array($booking['status'], ['completed', 'cancelled'], true)) {
     exit;
 }
 
-// Latest payment (if any)
-$stmt = $conn->prepare("SELECT * FROM payment WHERE booking_id = ? ORDER BY payment_id DESC LIMIT 1");
+// Latest payment (if any) - block if any 'pending' or 'paid' exists
+$stmt = $conn->prepare("SELECT * FROM payment WHERE booking_id = ? AND payment_status IN ('pending','paid') ORDER BY payment_id DESC LIMIT 1");
 $stmt->bind_param("i", $booking_id);
 $stmt->execute();
 $payment_row = $stmt->get_result()->fetch_assoc();
 $stmt->close();
+
+$already_paid   = ($payment_row && strtolower($payment_row['payment_status']) === 'paid');
+$pending_payment = ($payment_row && strtolower($payment_row['payment_status']) === 'pending');
 
 // Agreement must exist (as per your flow)
 $stmt = $conn->prepare("SELECT agreement_id FROM agreement_form WHERE booking_id = ? LIMIT 1");
@@ -150,11 +160,13 @@ $totals_match   = ($stored_total !== null) ? (abs($stored_total - $expected_tota
 // Decide amount to charge: prefer stored_total if present, else expected_total
 $amount_to_charge = $stored_total !== null ? $stored_total : $expected_total;
 
+// Strictly require 'approved' status only
+$can_pay_status = ($booking['status'] === 'approved');
+
 // Gate payment availability
-$can_pay_status = ($booking['status'] === 'approved' || $booking['status'] === 'confirmed'); // allow pay if approved, or confirmed with no paid record yet
-$already_paid   = ($payment_row && strtolower($payment_row['payment_status']) === 'paid');
 $can_pay = (
     !$already_paid &&
+    !$pending_payment &&
     $agreement_exists &&
     $guarantor_exists &&
     !$delivery_pending &&
@@ -162,8 +174,15 @@ $can_pay = (
     $amount_to_charge > 0
 );
 
-// If submitting payment, add server-side validation for credit card format
+// Payment process
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['pay_now'])) {
+    // CSRF check
+    if (empty($_POST['csrf_token']) || !hash_equals($_SESSION['csrf_token'], $_POST['csrf_token'])) {
+        $_SESSION['pay_error'] = "Invalid session. Please try again.";
+        header("Location: payment.php?booking_id=".$booking_id);
+        exit;
+    }
+
     $payment_method = isset($_POST['payment_method']) ? trim((string)$_POST['payment_method']) : 'Manual';
 
     if ($payment_method === 'Credit/Debit Card') {
@@ -174,7 +193,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['pay_now'])) {
         $digits = preg_replace('/\D/', '', $card_number_raw);
         // Basic card type and length checks
         $type = 'unknown';
-        if (preg_match('/^4\d{12}(\d{3})?(\d{3})?$/', $digits)) $type = 'visa'; // 13,16,19 allowed; we constrain to 16 for simplicity
+        if (preg_match('/^4\d{12}(\d{3})?(\d{3})?$/', $digits)) $type = 'visa';
         elseif (preg_match('/^(5[1-5]\d{14}|2(2[2-9]\d{12}|[3-6]\d{13}|7[01]\d{12}|720\d{12}))$/', $digits)) $type = 'mastercard';
         elseif (preg_match('/^3[47]\d{13}$/', $digits)) $type = 'amex';
         elseif (preg_match('/^6(?:011|5\d{2}|4[4-9]\d)\d{12}$/', $digits)) $type = 'discover';
@@ -227,7 +246,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['pay_now'])) {
         exit;
     }
 
-    $payment_date   = date('Y-m-d');
+    $payment_date   = date('Y-m-d H:i:s');
     $method_display = $payment_method;
 
     // Extra fields (for display only)
@@ -242,39 +261,112 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['pay_now'])) {
         }
     }
 
-    // Insert payment as paid
-    $stmt = $conn->prepare("INSERT INTO payment (booking_id, payment_date, amount, payment_method, payment_status) VALUES (?, ?, ?, ?, 'paid')");
-    $stmt->bind_param("isds", $booking_id, $payment_date, $amount_to_charge, $method_display);
-    $okPay = $stmt->execute();
-    $stmt->close();
-
-    if ($okPay) {
-        // Update booking status to confirmed (if not already)
-        $stmt = $conn->prepare("UPDATE booking SET status = 'confirmed' WHERE booking_id = ? AND cust_id = ?");
-        $stmt->bind_param("ii", $booking_id, $cust_id);
-        $stmt->execute();
+    // Transaction for safety & error logging
+    try {
+        $conn->begin_transaction();
+        // Insert payment as paid
+        $stmt = $conn->prepare("INSERT INTO payment (booking_id, payment_date, amount, payment_method, payment_status) VALUES (?, ?, ?, ?, 'paid')");
+        $stmt->bind_param("isds", $booking_id, $payment_date, $amount_to_charge, $method_display);
+        $okPay = $stmt->execute();
+        $payment_id = $stmt->insert_id;
         $stmt->close();
 
-        // Log to booking_log (best-effort)
-        if ($log = $conn->prepare("INSERT INTO booking_log (booking_id, action) VALUES (?, ?)")) {
-            $actionText = "Payment received (RM " . number_format($amount_to_charge, 2) . ", $method_display)";
-            $log->bind_param("is", $booking_id, $actionText);
-            $log->execute();
-            $log->close();
+        if ($okPay) {
+            // --- Generate PDF receipt ---
+            $stmt = $conn->prepare("SELECT b.*, c.car_brand, c.car_model, cust.full_name, cust.email 
+                FROM booking b
+                JOIN car c ON b.car_id = c.car_id
+                JOIN customer cust ON b.cust_id = cust.cust_id
+                WHERE b.booking_id = ?");
+            $stmt->bind_param("i", $booking_id);
+            $stmt->execute();
+            $booking_info = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+
+            $receipt_no     = htmlspecialchars($payment_id);
+            $customer_name  = htmlspecialchars($booking_info['full_name']);
+            $customer_email = htmlspecialchars($booking_info['email']);
+            $car = htmlspecialchars($booking_info['car_brand'] . ' ' . $booking_info['car_model']);
+            $pickup = date('d M Y, H:i', strtotime($booking_info['pickup_datetime']));
+            $return = date('d M Y, H:i', strtotime($booking_info['return_datetime']));
+            $amount_formatted = number_format($amount_to_charge, 2);
+
+            $html = <<<EOD
+            <style>
+            body { font-family: Arial, sans-serif; }
+            .header { text-align:center; font-size:1.18em; font-weight:bold; color:#2f377d; }
+            .receipt-table { width:100%; border-collapse:collapse; margin:24px 0; }
+            .receipt-table th, .receipt-table td { padding:8px 12px; text-align:left; }
+            .receipt-table th { background:#f8f8f8; width:38%; }
+            .row-bold { font-weight:600; }
+            .note { font-size:.92em; color:#6a7898; margin-top:8px; }
+            </style>
+            <div class="header">Payment Receipt</div>
+            <table class="receipt-table" border="1">
+                <tr><th>Receipt No</th><td>{$receipt_no}</td></tr>
+                <tr><th>Booking ID</th><td>{$booking_info['booking_id']}</td></tr>
+                <tr><th>Customer</th><td>{$customer_name} ({$customer_email})</td></tr>
+                <tr><th>Car</th><td>{$car}</td></tr>
+                <tr><th>Rental Period</th><td>{$pickup} &rarr; {$return}</td></tr>
+                    <tr><th>Amount Paid</th><td class="row-bold">RM {$amount_formatted}</td></tr>
+                <tr><th>Payment Method</th><td>{$method_display}</td></tr>
+                <tr><th>Payment Date</th><td>{$payment_date}</td></tr>
+            </table>
+            <div class="note">Thank you for your payment. Please keep this receipt for your records.</div>
+            EOD;
+
+            $mpdf = new \Mpdf\Mpdf(['tempDir' => sys_get_temp_dir()]);
+            $mpdf->SetTitle("Receipt #$receipt_no");
+            $mpdf->WriteHTML($html);
+            $pdf_blob = $mpdf->Output('', \Mpdf\Output\Destination::STRING_RETURN);
+
+            // --- Store PDF BLOB in payment table ---
+            $stmt = $conn->prepare("UPDATE payment SET receipt_pdf = ? WHERE payment_id = ?");
+            $null = NULL;
+            $stmt->bind_param('bi', $null, $payment_id); // 'b' for blob, 'i' for int
+            $stmt->send_long_data(0, $pdf_blob);
+            $stmt->execute();
+            $stmt->close();
+
+            // Update booking status to confirmed (if not already)
+            $stmt = $conn->prepare("UPDATE booking SET status = 'confirmed' WHERE booking_id = ? AND cust_id = ?");
+            $stmt->bind_param("ii", $booking_id, $cust_id);
+            $stmt->execute();
+            $stmt->close();
+
+            // Log to booking_log
+            if ($log = $conn->prepare("INSERT INTO booking_log (booking_id, action) VALUES (?, ?)")) {
+                $actionText = "Payment received (RM " . number_format($amount_to_charge, 2) . ", $method_display, Payment ID: $payment_id)";
+                $log->bind_param("is", $booking_id, $actionText);
+                $log->execute();
+                $log->close();
+            }
+
+            // Send payment confirmation email (add payment_id for ref)
+            sendPaymentEmail($conn, $booking_id, $cust_id, $amount_to_charge, $payment_id);
+
+            $conn->commit();
+
+            // Redirect to receipt/confirmation page with payment_id
+            header("Location: payment_success.php?booking_id=$booking_id&payment_id=$payment_id");
+            exit;
+        } else {
+            throw new Exception("Failed to record payment.");
         }
+    } catch (Throwable $e) {
+        $conn->rollback();
+        // Log error to payment_error_log table
+        $errMsg = $e->getMessage();
+        $logStmt = $conn->prepare("INSERT INTO payment_error_log (booking_id, cust_id, error_message, created_at) VALUES (?, ?, ?, NOW())");
+        $logStmt->bind_param("iis", $booking_id, $cust_id, $errMsg);
+        $logStmt->execute();
+        $logStmt->close();
 
-        // Send payment confirmation email
-        sendPaymentEmail($conn, $booking_id, $cust_id, $amount_to_charge);
-
-        header("Location: bookings.php?payment=success");
-        exit;
-    } else {
-        $_SESSION['pay_error'] = "Failed to record payment. Please try again.";
+        $_SESSION['pay_error'] = "Failed to record payment. Please try again or contact support. Error: ".$errMsg;
         header("Location: bookings.php");
         exit;
     }
 }
-
 include '../includes/header.php';
 ?>
 <link rel="stylesheet" href="/assets/css/style.css">
@@ -380,10 +472,10 @@ include '../includes/header.php';
     <?php elseif ($can_pay): ?>
         <form action="payment.php" method="post" id="paymentForm" autocomplete="off" novalidate>
             <input type="hidden" name="booking_id" value="<?= htmlspecialchars((string)$booking_id) ?>">
+            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>">
 
             <label for="payment_method"><strong>Choose Payment Method:</strong></label>
             <select name="payment_method" id="payment_method" class="payment-method-select" required>
-                <option value="Manual">Manual / Counter</option>
                 <option value="Online Banking">Online Banking</option>
                 <option value="Credit/Debit Card">Credit/Debit Card</option>
             </select>
@@ -682,7 +774,7 @@ include '../includes/header.php';
 
 <?php
 // --------------- Email helper ---------------
-function sendPaymentEmail(mysqli $conn, int $booking_id, int $cust_id, float $amount)
+function sendPaymentEmail(mysqli $conn, int $booking_id, int $cust_id, float $amount, int $payment_id)
 {
     // Fetch details for email
     $stmt = $conn->prepare("
@@ -735,6 +827,7 @@ function sendPaymentEmail(mysqli $conn, int $booking_id, int $cust_id, float $am
                 <tr><td style='padding:4px 8px;font-weight:bold;'>Pickup Date &amp; Time</td><td style='padding:4px 8px;'>{$pickup}</td></tr>
                 <tr><td style='padding:4px 8px;font-weight:bold;'>Return Date &amp; Time</td><td style='padding:4px 8px;'>{$return}</td></tr>
                 <tr><td style='padding:4px 8px;font-weight:bold;'>Amount Paid</td><td style='padding:4px 8px;'>RM " . number_format($amount,2) . "</td></tr>
+                <tr><td style='padding:4px 8px;font-weight:bold;'>Payment Reference</td><td style='padding:4px 8px;'>" . intval($payment_id) . "</td></tr>
             </table>
             <p>Thank you for choosing TimeLess Car Rental. We look forward to serving you!</p>
             <br>
@@ -746,7 +839,8 @@ function sendPaymentEmail(mysqli $conn, int $booking_id, int $cust_id, float $am
             "Car Model: {$car_model}\n" .
             "Pickup Date & Time: {$pickup}\n" .
             "Return Date & Time: {$return}\n" .
-            "Amount Paid: RM " . number_format($amount,2) . "\n\n" .
+            "Amount Paid: RM " . number_format($amount,2) . "\n" .
+            "Payment Ref: " . intval($payment_id) . "\n\n" .
             "Thank you for choosing TimeLess Car Rental.\n\n" .
             "Best regards,\nTimeLess Car Rental Team";
 

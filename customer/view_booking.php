@@ -288,10 +288,52 @@ body { background:#eceef4; }
         </tr>
         <tr><th>Stored Total (DB)</th><td>RM <?= number_format($stored_total,2) ?></td></tr>
     </table>
+
     <div class="inline-note">
         Stored total reflects delivery fee once applied. While delivery fee is pending, expected total excludes that fee.
     </div>
+    <!-- ... [existing code above remains unchanged] ... -->
 
+<div class="section-label">Payments</div>
+<table class="review-table">
+    <tr>
+        <th>Payment Receipts</th>
+        <td>
+            <?php
+            // Fetch all payments for this booking
+            $payStmt = $conn->prepare("SELECT payment_id, payment_date, amount, payment_method, payment_status, receipt_pdf FROM payment WHERE booking_id=? ORDER BY payment_id ASC");
+            $payStmt->bind_param('i', $booking_id);
+            $payStmt->execute();
+            $payments = $payStmt->get_result()->fetch_all(MYSQLI_ASSOC);
+            $payStmt->close();
+
+            if (empty($payments)) {
+                echo '<span style="color:#b32828;">No payment records.</span>';
+            } else {
+                echo '<ul style="padding-left:16px;">';
+                foreach ($payments as $p) {
+                    $has_pdf = !empty($p['receipt_pdf']);
+                    $date = $p['payment_date'] ? date('d M Y, H:i', strtotime($p['payment_date'])) : '-';
+                    $amount = 'RM ' . number_format((float)$p['amount'], 2);
+                    $method = htmlspecialchars($p['payment_method']);
+                    $status = ucfirst($p['payment_status']);
+                    echo '<li style="margin-bottom:7px;">';
+                    echo "[$date] $amount &mdash; $method ($status)";
+                    if ($has_pdf) {
+                        echo ' <a href="../customer/payment_receipt_blob.php?payment_id=' . intval($p['payment_id']) . '" target="_blank" style="margin-left:8px; color:#2377c7; text-decoration:underline; font-weight:600;">View Receipt PDF</a>';
+                    } else {
+                        echo ' <span style="color:#b32828; font-size:.9em;">(No PDF)</span>';
+                    }
+                    echo '</li>';
+                }
+                echo '</ul>';
+            }
+            ?>
+        </td>
+    </tr>
+</table>
+
+<!-- ... [existing code below remains unchanged] ... -->
     <div class="section-label">Customer (Driver)</div>
     <table class="data-table">
         <tr><th>Full Name</th><td><?= htmlspecialchars($customer['full_name'] ?? '-') ?></td></tr>

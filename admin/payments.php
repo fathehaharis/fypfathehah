@@ -264,7 +264,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                             $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') ? 'https' : 'http';
                             $host   = $_SERVER['HTTP_HOST'] ?? 'localhost';
-                            $refUrl = $scheme.'://'.$host.'/customer/my_refunds.php';
+
 
                             $amountStr = nf($depositRefundRow['amount']);
                             $subject = "Deposit Refund Processed – Booking #{$booking_id}";
@@ -340,8 +340,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                     <strong>Reference:</strong> ".e($rentRefCode)."<br>
                                     <strong>Amount:</strong> RM ".e($amountStr)."
                                   </p>
-                                  <p>You can view the refund details here:</p>
-                                  <p><a href='".e($refUrl)."' style='color:#1a54b3' target='_blank'>My Refunds</a></p>
                                   <p style='color:#555'>Thank you for choosing TimeLess Car Rental.</p>
                                 </div>
                             ";
@@ -666,8 +664,8 @@ tr.highlight-rental-process { background:linear-gradient(90deg,#d9ffe6,#b3ffc9);
                 <th>Booking Status</th>
                 <th>Deposit Refund</th>
                 <th>Rental Refund</th>
-                <th>Method</th>
-                <th>Paid Date</th>
+                <th>Method / Paid Date</th>
+                <th>Receipt</th>
             </tr>
             </thead>
             <tbody>
@@ -806,8 +804,21 @@ tr.highlight-rental-process { background:linear-gradient(90deg,#d9ffe6,#b3ffc9);
                         <td><?= $bookingBadge ?></td>
                         <td><?= $depositCell ?></td>
                         <td><?= $rentalRefundCell ?></td>
-                        <td><?= e($row['payment_method'] ?? '-') ?></td>
-                        <td><?= e($row['payment_date'] ?? '-') ?></td>
+                        <td>
+                            <?= e($row['payment_method'] ?? '-') ?><br>
+                            <span style="font-size:.65em;color:#516072;">
+                                <?= e($row['payment_date'] ?? '-') ?>
+                            </span>
+                        </td>
+                        <td>
+                            <?php if (!empty($row['payment_id'])): ?>
+                                <a href="/customer/payment_receipt_blob.php?payment_id=<?= e($row['payment_id']) ?>" target="_blank" style="font-size:.92em; color:#2d5fd6; font-weight:600; text-decoration:none;">
+                                    View Receipt
+                                </a>
+                            <?php else: ?>
+                                <span style="color:#b2b2b2;">-</span>
+                            <?php endif; ?>
+                        </td>
                     </tr>
                 <?php endwhile; ?>
             <?php else: ?>

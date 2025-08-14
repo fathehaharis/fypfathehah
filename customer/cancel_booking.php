@@ -29,17 +29,15 @@ $cust_id    = (int)$_SESSION['cust_id'];
 
 /*
  * Rental fee refund policy based on calendar days before pickup.
- * If cancel 7+ days before: 100%
- * 3-6 days: 50%
- * 1-2 days: 25%
- * Same day or after: 0%
+ * 3+ days: 100%
+ * 1-2 days: 50%
+ * Same day: 0%
  * Security deposit is always non-refundable.
  */
 const RENTAL_REFUND_POLICY_DAYS = [
-    7 => 1.00,  // 7 or more days before pickup
-    3 => 0.50,  // 3-6 days
-    1 => 0.25,  // 1-2 days
-    0 => 0.00   // Same day or after
+    3 => 1.00,  // 3 or more days before pickup
+    1 => 0.50,  // 1-2 days
+    0 => 0.00   // Same day
 ];
 function determineRentalRefundRateDays(int $daysToPickup): float {
     foreach (RENTAL_REFUND_POLICY_DAYS as $threshold => $rate) {
@@ -110,10 +108,6 @@ try {
     // Prevent cancellation after pickup
     if ($days_to_pickup < 0) {
         throw new Exception("Cannot cancel after the pickup day has passed.");
-    }
-    // Block confirmed < 1 calendar day before pickup
-    if ($status === 'confirmed' && $days_to_pickup < 1) {
-        throw new Exception("Confirmed bookings cannot be cancelled less than 1 calendar day before pickup.");
     }
 
     $security_deposit = (float)$booking['security_deposit'];
@@ -241,10 +235,10 @@ function sendCancellationEmailRentalOnly(
     $mail = new PHPMailer\PHPMailer\PHPMailer(true);
     try {
         $mail->isSMTP();
-        $mail->Host       = 'smtp.gmail.com'; // Your SMTP server
+        $mail->Host       = 'smtp.gmail.com';
         $mail->SMTPAuth   = true;
-        $mail->Username   = 'fathehaharis69@gmail.com'; // Your SMTP username
-        $mail->Password   = 'cuel ijeu lzqv vsgv';   // Your SMTP password or app password
+        $mail->Username   = 'fathehaharis69@gmail.com';
+        $mail->Password   = 'cuel ijeu lzqv vsgv';
         $mail->SMTPSecure = 'tls';
         $mail->Port       = 587;
 

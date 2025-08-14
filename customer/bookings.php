@@ -22,20 +22,19 @@ $csrf_token = $_SESSION['csrf_token'];
 
 /* -------------------------------------------------
    Refund Policy for display (calendar days)
+   (Matches new policy: 3+ days: 100%, 1-2 days: 50%, same day: 0%)
 ------------------------------------------------- */
 const REFUND_POLICY_DAYS = [
-    7 => 1.00,  // 7 or more days before pickup
-    3 => 0.50,  // 3-6 days
-    1 => 0.25,  // 1-2 days
-    0 => 0.00   // same day or after
+    3 => 1.00,  // 3 or more days before pickup
+    1 => 0.50,  // 1–2 days
+    0 => 0.00   // same day
 ];
 function buildRefundPolicyLinesDays(): array {
-    $lines = [];
-    foreach (REFUND_POLICY_DAYS as $days => $rate) {
-        $label = $days . " calendar day" . ($days > 1 ? "s" : "");
-        $lines[] = "≥ {$label} before pickup: " . number_format($rate * 100, 0) . "% deposit refund";
-    }
-    return $lines;
+    return [
+        "Cancel <b>3 or more calendar days</b> before pickup: <b>100% refund of rental fee</b>",
+        "Cancel <b>1–2 calendar days</b> before pickup: <b>50% refund of rental fee</b>",
+        "Cancel <b>Same day</b>: <b>0% refund of rental fee</b>"
+    ];
 }
 
 /* -------------------------------------------------
@@ -149,10 +148,7 @@ function canCancel(array $b): bool {
     }
     $days_to_pickup = daysToPickup($b);
     if ($days_to_pickup < 0) return false; // after pickup
-    if ($status === 'confirmed' && $days_to_pickup < 1) {
-        return false; // confirmed, less than 1 calendar day before pickup
-    }
-    return true;
+    return true; // always allow, refund depends on policy
 }
 
 /* -------------------------------------------------
@@ -258,9 +254,9 @@ document.addEventListener('DOMContentLoaded',()=>{
 <div class="refund-policy-box">
     <strong>Cancellation Refund Policy</strong><br>
     <ul style="margin:8px 0 6px 16px; padding:0;">
-        <li>Cancel <b>7 or more calendar days</b> before pickup: <b>100% refund of rental fee</b></li>
-        <li>Cancel <b>3–6 calendar days</b> before pickup: <b>50% refund of rental fee</b></li>
-        <li>Cancel <b>1–2 calendar days</b> before pickup: <b>25% refund of rental fee</b></li>
+        <li>Cancel <b>3 or more calendar days</b> before pickup: <b>100% refund of rental fee</b></li>
+        <li>Cancel <b>1–2 calendar days</b> before pickup: <b>50% refund of rental fee</b></li>
+        <li>Cancel <b>Same day</b>: <b>0% refund of rental fee</b></li>
     </ul>
     <span style="color:#3b4a6b;">Security deposit is non-refundable.</span>
 </div>
@@ -274,7 +270,6 @@ document.addEventListener('DOMContentLoaded',()=>{
                     <table class="booking-table">
                         <tr>
                             <th>Car</th>
-                            <th>Plate No</th>
                             <th>Pickup Date</th>
                             <th>Return Date</th>
                             <th>Duration</th>
@@ -389,8 +384,6 @@ document.addEventListener('DOMContentLoaded',()=>{
                                             <input type="hidden" name="booking_id" value="<?= (int)$b['booking_id'] ?>">
                                             <button type="submit" class="action-btn cancel">Cancel</button>
                                         </form>
-                                    <?php elseif (($section === 'Pending' || $section === 'Upcoming') && !$is_cancellable): ?>
-                                        <span style="color:#999;font-size:0.78em;display:inline-block;max-width:150px;line-height:1.2em;">Cannot cancel less than 1 calendar day before pickup</span>
                                     <?php endif; ?>
                                 </td>
                             </tr>

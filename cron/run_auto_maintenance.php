@@ -3,7 +3,7 @@ declare(strict_types=1);
 date_default_timezone_set('Asia/Kuala_Lumpur');
 require __DIR__ . '/../connect.php';
 
-const STATUSES_TO_CANCEL = ['approved']; // add 'pending' if you also want to cancel those
+const STATUSES_TO_CANCEL = ['pending', 'approved']; // add 'pending' if you also want to cancel those
 const ACTIVE_STATUSES    = ['pending','waiting_verification','approved','confirmed']; // statuses that keep the car reserved
 const CANCELLATION_REASON = 'Auto-cancelled: no payment before pickup';
 const GRACE_MINUTES = 0;
