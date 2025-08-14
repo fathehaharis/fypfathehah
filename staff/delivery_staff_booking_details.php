@@ -47,6 +47,18 @@ if (!$authRow) {
     exit;
 }
 
+/* Fetch staff contact (ADDED) */
+$staff_phone = null;
+$staff_name  = null;
+$stfStmt = $conn->prepare("SELECT full_name, phone_number FROM delivery_staff WHERE staff_id = ? LIMIT 1");
+$stfStmt->bind_param("i", $staff_id);
+$stfStmt->execute();
+$stfStmt->bind_result($staff_name, $staff_phone);
+$stfStmt->fetch();
+$stfStmt->close();
+$staff_phone = trim((string)$staff_phone);
+$staff_name  = trim((string)$staff_name);
+
 // Booking + minimal customer + car (with color) for verification (+ customer email for notifications)
 $bkStmt = $conn->prepare("
 SELECT 
@@ -107,9 +119,17 @@ $returnImages = array_values(array_filter($booking_imgs, fn($im) => strtolower($
 /**
  * Send "Out for Delivery" notification email to customer via SMTP (PHPMailer).
  *
+ * Added parameters: $staffPhone, $staffName to include direct staff contact information.
+ *
  * Returns [bool success, string message]
  */
-function notify_out_for_delivery(string $toEmail, array $booking, array $serviceRow): array
+function notify_out_for_delivery(
+    string $toEmail,
+    array $booking,
+    array $serviceRow,
+    ?string $staffPhone,
+    ?string $staffName
+): array
 {
     if (!filter_var($toEmail, FILTER_VALIDATE_EMAIL)) {
         return [false, "Customer email is invalid or missing; skipped email notification."];
@@ -121,7 +141,6 @@ function notify_out_for_delivery(string $toEmail, array $booking, array $service
         if (file_exists($autoload)) {
             require_once $autoload;
         } else {
-            // Fallback to local PHPMailer if you store it without Composer (adjust paths accordingly)
             @require_once __DIR__ . '/../PHPMailer/src/PHPMailer.php';
             @require_once __DIR__ . '/../PHPMailer/src/SMTP.php';
             @require_once __DIR__ . '/../PHPMailer/src/Exception.php';
@@ -132,10 +151,13 @@ function notify_out_for_delivery(string $toEmail, array $booking, array $service
         return [false, "Mailer library not available; skipped email notification."];
     }
 
-    $bookingId = (int)($booking['booking_id'] ?? 0);
-    $car = trim(($booking['car_brand'] ?? '') . ' ' . ($booking['car_model'] ?? ''));
-    $pickupDT = !empty($booking['pickup_datetime']) ? date('d/m/Y H:i', strtotime($booking['pickup_datetime'])) : '-';
-    $customerName = (string)($booking['customer_name'] ?? 'Customer');
+    $bookingId     = (int)($booking['booking_id'] ?? 0);
+    $car           = trim(($booking['car_brand'] ?? '') . ' ' . ($booking['car_model'] ?? ''));
+    $pickupDT      = !empty($booking['pickup_datetime']) ? date('d/m/Y H:i', strtotime($booking['pickup_datetime'])) : '-';
+    $customerName  = (string)($booking['customer_name'] ?? 'Customer');
+    $cleanStaffPhone = preg_replace('/\D+/', '', (string)$staffPhone);
+    $displayStaffPhone = $cleanStaffPhone ?: '0199590828'; // fallback to company number
+    $displayStaffName  = $staffName ?: 'Delivery Staff';
 
     $subject = "Your car is out for delivery (Booking #$bookingId)";
     $html = "
@@ -147,36 +169,41 @@ function notify_out_for_delivery(string $toEmail, array $booking, array $service
                 <tr><td><strong>Booking ID</strong></td><td>#{$bookingId}</td></tr>
                 <tr><td><strong>Car</strong></td><td>".htmlspecialchars($car, ENT_QUOTES, 'UTF-8')."</td></tr>
                 <tr><td><strong>Scheduled Delivery Time</strong></td><td>{$pickupDT}</td></tr>
+                <tr><td><strong>Delivery Staff</strong></td><td>".htmlspecialchars($displayStaffName, ENT_QUOTES, 'UTF-8')."</td></tr>
+                <tr><td><strong>Staff Contact</strong></td><td>".htmlspecialchars($displayStaffPhone, ENT_QUOTES, 'UTF-8')."</td></tr>
             </table>
+            <p>If you have any questions or issues regarding the delivery, please contact the staff directly at 
+               <strong>".htmlspecialchars($displayStaffPhone, ENT_QUOTES, 'UTF-8')."</strong>.</p>
             <p>Thank you for choosing Timeless Car Rental.</p>
-            <p style='color:#666;font-size:12px;'>Please TimeLess Car Rental contact number if got any problem 0199590828</p>
+            <p style='color:#666;font-size:12px;'>If you cannot reach the staff, you may contact Timeless Car Rental at 0199590828.</p>
             <p style='color:#666;font-size:12px;'>This is an automated message. Please do not reply to this email.</p>
         </div>
     ";
+
     $alt = "Out for Delivery\n\n"
          . "Booking ID: #$bookingId\n"
          . "Car: $car\n"
-         . "Scheduled Delivery Time: $pickupDT\n\n"
+         . "Scheduled Delivery Time: $pickupDT\n"
+         . "Delivery Staff: $displayStaffName\n"
+         . "Staff Contact: $displayStaffPhone\n\n"
+         . "If you have any issues, call the staff above or Timeless Car Rental at 0199590828.\n"
          . "Thank you for choosing Timeless Car Rental.";
 
     try {
-        // Use PHPMailer namespace
         $mail = new \PHPMailer\PHPMailer\PHPMailer(true);
 
-        // SMTP settings (example values provided; replace with your secure config)
+        // SMTP settings (replace with secure config or environment variables)
         $mail->isSMTP();
-        $mail->Host       = 'smtp.gmail.com';         // Your SMTP server
+        $mail->Host       = 'smtp.gmail.com';
         $mail->SMTPAuth   = true;
-        $mail->Username   = 'fathehaharis69@gmail.com'; // Your SMTP username
-        $mail->Password   = 'cuel ijeu lzqv vsgv';      // Your SMTP password or app password
+        $mail->Username   = 'fathehaharis69@gmail.com';
+        $mail->Password   = 'cuel ijeu lzqv vsgv'; // Consider moving to env/config
         $mail->SMTPSecure = 'tls';
         $mail->Port       = 587;
 
-        // From / To
         $mail->setFrom('no-reply@timelesscarrental.com', 'Timeless Car Rental');
         $mail->addAddress($toEmail, $customerName);
 
-        // Content
         $mail->isHTML(true);
         $mail->Subject = $subject;
         $mail->Body    = $html;
@@ -185,7 +212,6 @@ function notify_out_for_delivery(string $toEmail, array $booking, array $service
         $mail->send();
         return [true, "Email notification sent to customer."];
     } catch (\Throwable $e) {
-        // Do not expose internal errors to end user; log if needed
         return [false, "Status updated but email notification failed."];
     }
 }
@@ -216,14 +242,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'set_o
                 if ($upd->execute()) {
                     $flash = "Status updated to Out for Delivery.";
 
-                    // Try sending email notification to customer
-                    [$ok, $msg] = notify_out_for_delivery($customerEmail, $booking, $svc);
-                    if ($ok) {
-                        $flash .= " " . $msg;
-                    } else {
-                        // Show as non-blocking warning
-                        $flash .= " " . $msg;
-                    }
+                    // Try sending email notification to customer (PASS staff contact now)
+                    [$ok, $msg] = notify_out_for_delivery($customerEmail, $booking, $svc, $staff_phone, $staff_name);
+                    $flash .= " " . $msg;
                 } else {
                     $err = "Failed to update status.";
                 }
@@ -276,7 +297,6 @@ include 'staff_header.php';
         .gallery { display:flex; gap:12px; flex-wrap:wrap; }
         .thumb { width:150px; height:100px; object-fit:cover; border:1px solid #cfd6e4; border-radius:8px; background:#fff; cursor:pointer; }
         .note { font-size:.82em; color:#6a7485; }
-        /* Modal */
         #imgModal { position:fixed; inset:0; background:rgba(16,26,44,.85); display:none; align-items:center; justify-content:center; z-index:9999; padding:40px 26px; }
         #imgModal img { max-width:90vw; max-height:80vh; box-shadow:0 10px 28px rgba(0,0,0,.55); border-radius:10px; background:#fff; }
         #imgModal .close-btn, #imgModal .nav-btn { position:absolute; background:#ffffff; border:none; padding:10px 16px; border-radius:8px; font-weight:700; cursor:pointer; box-shadow:0 2px 8px rgba(0,0,0,.25); font-size:.75rem; }
@@ -336,7 +356,6 @@ include 'staff_header.php';
         <tr><th>Pickup</th><td><?= !empty($booking['pickup_datetime']) ? date('d/m/Y H:i', strtotime($booking['pickup_datetime'])) : '-' ?></td></tr>
         <tr><th>Return</th><td><?= !empty($booking['return_datetime']) ? date('d/m/Y H:i', strtotime($booking['return_datetime'])) : '-' ?></td></tr>
         <tr><th>Day Count</th><td><?= e((string)($booking['day_count'] ?? '-')) ?></td></tr>
-        <!-- Removed: Booking Status, Total Price, Security Deposit -->
     </table>
 
     <div class="section-title">Services</div>
