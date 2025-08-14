@@ -315,7 +315,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['pay_now'])) {
             <div class="note">Thank you for your payment. Please keep this receipt for your records.</div>
             EOD;
 
-            $mpdf = new \Mpdf\Mpdf(['tempDir' => sys_get_temp_dir()]);
+            $mpdf = new Mpdf(['tempDir' => sys_get_temp_dir()]);
             $mpdf->SetTitle("Receipt #$receipt_no");
             $mpdf->WriteHTML($html);
             $pdf_blob = $mpdf->Output('', \Mpdf\Output\Destination::STRING_RETURN);
