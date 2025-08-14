@@ -29,15 +29,17 @@ $cust_id    = (int)$_SESSION['cust_id'];
 
 /*
  * Rental fee refund policy based on calendar days before pickup.
- * 3+ days: 100%
- * 1-2 days: 50%
- * Same day: 0%
+ * If cancel 7+ days before: 100%
+ * 3-6 days: 50%
+ * 1-2 days: 25%
+ * Same day or after: 0%
  * Security deposit is always non-refundable.
  */
 const RENTAL_REFUND_POLICY_DAYS = [
-    3 => 1.00,  // 3 or more days before pickup
-    1 => 0.50,  // 1-2 days
-    0 => 0.00   // Same day
+    7 => 1.00,  // 7 or more days before pickup
+    3 => 0.50,  // 3-6 days
+    1 => 0.25,  // 1-2 days
+    0 => 0.00   // Same day or after
 ];
 function determineRentalRefundRateDays(int $daysToPickup): float {
     foreach (RENTAL_REFUND_POLICY_DAYS as $threshold => $rate) {
@@ -109,6 +111,10 @@ try {
     if ($days_to_pickup < 0) {
         throw new Exception("Cannot cancel after the pickup day has passed.");
     }
+    // Block confirmed < 1 calendar day before pickup
+    if ($status === 'confirmed' && $days_to_pickup < 1) {
+        throw new Exception("Confirmed bookings cannot be cancelled less than 1 calendar day before pickup.");
+    }
 
     $security_deposit = (float)$booking['security_deposit'];
     $total_price = (float)$booking['total_price'];
@@ -117,15 +123,22 @@ try {
     $rental_refund_rate = determineRentalRefundRateDays($days_to_pickup);
     $rental_refund_amount = round($rental_fee * $rental_refund_rate, 2);
 
-    // DB update: mark status as cancelled (other refund logic as needed)
+    // Prepare cancellation reason for audit
+    $cancellation_reason = "Customer-initiated cancellation: Security deposit is non-refundable as per policy.";
+
+    // Update: mark as cancelled and forfeit deposit
     $update = $conn->prepare("
         UPDATE booking
         SET status = 'cancelled',
+            deposit_status = 'forfeited',
+            security_deposit_refund = 0,
+            security_deposit_deduction = ?,
+            cancellation_reason = ?,
             updated_at = NOW()
         WHERE booking_id = ?
           AND status NOT IN ('cancelled','completed','rejected')
     ");
-    $update->bind_param("i", $booking_id);
+    $update->bind_param("dsi", $security_deposit, $cancellation_reason, $booking_id);
     $update->execute();
     if ($update->affected_rows < 1) {
         $update->close();
@@ -133,7 +146,7 @@ try {
     }
     $update->close();
 
-    // Insert refund record if refund amount > 0
+    // Insert refund record for rental fee if refund amount > 0
     if ($rental_refund_amount > 0) {
         $insertRefund = $conn->prepare("
             INSERT INTO refunds 
@@ -161,7 +174,7 @@ try {
     logBookingAction(
         $conn,
         $booking_id,
-        "Booking cancelled; rental refund=RM ".number_format($rental_refund_amount,2)." (rate ".($rental_refund_rate*100)."%)"
+        "Booking cancelled; rental refund=RM ".number_format($rental_refund_amount,2)." (rate ".($rental_refund_rate*100)."%) | Deposit forfeited"
     );
 
     // Release car if no other active bookings
@@ -207,8 +220,8 @@ try {
 
     $_SESSION['cancel_success'] =
         $rental_refund_amount > 0
-            ? "Booking cancelled. Your rental fee refund (RM ".number_format($rental_refund_amount,2).") will be processed. Security deposit is non-refundable."
-            : "Booking cancelled. No refund according to policy. Security deposit is non-refundable.";
+            ? "Booking cancelled. Your rental fee refund (RM ".number_format($rental_refund_amount,2).") will be processed. Security deposit is non-refundable and has been forfeited."
+            : "Booking cancelled. No rental fee refund according to policy. Security deposit is non-refundable and has been forfeited.";
 
 } catch (Throwable $e) {
     $conn->rollback();
@@ -235,10 +248,10 @@ function sendCancellationEmailRentalOnly(
     $mail = new PHPMailer\PHPMailer\PHPMailer(true);
     try {
         $mail->isSMTP();
-        $mail->Host       = 'smtp.gmail.com';
+        $mail->Host       = 'smtp.gmail.com'; // Your SMTP server
         $mail->SMTPAuth   = true;
-        $mail->Username   = 'fathehaharis69@gmail.com';
-        $mail->Password   = 'cuel ijeu lzqv vsgv';
+        $mail->Username   = 'fathehaharis69@gmail.com'; // Your SMTP username
+        $mail->Password   = 'cuel ijeu lzqv vsgv';   // Your SMTP password or app password
         $mail->SMTPSecure = 'tls';
         $mail->Port       = 587;
 
@@ -265,7 +278,7 @@ function sendCancellationEmailRentalOnly(
             <ul style='line-height:1.4'>
                 <li><b>Pickup:</b> {$pickup}</li>
                 <li><b>Return:</b> {$return}</li>
-                <li><b>Security Deposit Held:</b> RM ".number_format($depositHeld,2)." <span style='color:#a00'>(non-refundable)</span></li>
+                <li><b>Security Deposit Held:</b> RM ".number_format($depositHeld,2)." <span style='color:#a00'>(non-refundable and forfeited)</span></li>
                 <li><b>Total Paid:</b> RM ".number_format($totalPaid,2)."</li>
             </ul>
             <p>{$refundLine}</p>
@@ -280,7 +293,7 @@ function sendCancellationEmailRentalOnly(
 Your booking (ID: {$booking_id}) for {$car_model} has been cancelled.
 Pickup: {$pickup}
 Return: {$return}
-Security Deposit Held: RM ".number_format($depositHeld,2)." (non-refundable)
+Security Deposit Held: RM ".number_format($depositHeld,2)." (non-refundable and forfeited)
 Total Paid: RM ".number_format($totalPaid,2)."
 
 ".($rentalRefund > 0

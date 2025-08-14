@@ -16,21 +16,35 @@ $csrf_token = $_SESSION['csrf_token'];
 /* -------------- Helpers -------------- */
 function h($v){ return htmlspecialchars($v ?? '', ENT_QUOTES, 'UTF-8'); }
 
+/* -------------- Phone Validation (Malaysia Mobile) -------------- */
+/*
+ * Valid Malaysian mobile format (local): 
+ *  - Starts with 01
+ *  - Next digit NOT 5 (exclude legacy 015 ranges except fixed line services)
+ *  - Total digits: 10 or 11 (so remaining 7 or 8 digits)
+ * Pattern used: ^01[0-46-9][0-9]{7,8}$
+ * Accept only digits (no +6 or country code in this field). Optional field.
+ */
+function isValidMYPhone($phone) {
+    $digits = preg_replace('/\D/', '', $phone); // strip non-digits
+    return (bool)preg_match('/^01[0-46-9][0-9]{7,8}$/', $digits);
+}
+
 $staff_id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
 if ($staff_id < 1) {
-    header("Location: services.php");
+    header("Location: delivery_staff.php");
     exit;
 }
 
 /* Fetch staff (initial) */
-$stmtFetch = $conn->prepare("SELECT staff_id, username, full_name, status FROM delivery_staff WHERE staff_id = ?");
+$stmtFetch = $conn->prepare("SELECT staff_id, username, full_name, phone_number, status FROM delivery_staff WHERE staff_id = ?");
 $stmtFetch->bind_param("i", $staff_id);
 $stmtFetch->execute();
 $staff = $stmtFetch->get_result()->fetch_assoc();
 $stmtFetch->close();
 
 if (!$staff) {
-    header("Location: services.php");
+    header("Location: delivery_staff.php");
     exit;
 }
 
@@ -44,13 +58,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $error = "Invalid session token. Please reload the page.";
     } else {
 
-        $username   = trim($_POST['username'] ?? '');
-        $full_name  = trim($_POST['full_name'] ?? '');
-        $status_raw = $_POST['status'] ?? 'active';
-        $status     = ($status_raw === 'inactive') ? 'inactive' : 'active';
-        $password   = $_POST['password'] ?? '';
+        $username    = trim($_POST['username'] ?? '');
+        $full_name   = trim($_POST['full_name'] ?? '');
+        $phone_raw   = trim($_POST['phone_number'] ?? '');
+        $status_raw  = $_POST['status'] ?? 'active';
+        $status      = ($status_raw === 'inactive') ? 'inactive' : 'active';
+        $password    = $_POST['password'] ?? '';
 
-        // Validate inputs
+        // Basic validations
         if ($username === '' || $full_name === '') {
             $error = "Username and Full Name are required.";
         } elseif (!preg_match('/^[A-Za-z0-9_]{3,50}$/', $username)) {
@@ -59,7 +74,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $error = "Full Name cannot exceed 100 characters.";
         } elseif ($password !== '' && strlen($password) < 6) {
             $error = "Password must be at least 6 characters (or leave blank to keep existing).";
+        } elseif ($phone_raw !== '' && !isValidMYPhone($phone_raw)) {
+            $error = "Phone number must be a valid Malaysian mobile (10 or 11 digits, starts with 01).";
         }
+
+        // Normalize phone to digits if provided
+        $phone_number = $phone_raw === '' ? '' : preg_replace('/\D/', '', $phone_raw);
 
         if (!$error) {
             // Only check duplicate if username changed
@@ -80,23 +100,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $hashed_pw = password_hash($password, PASSWORD_DEFAULT);
                 $stmtUpdate = $conn->prepare("
                     UPDATE delivery_staff 
-                    SET username = ?, full_name = ?, password = ?, status = ? 
+                    SET username = ?, full_name = ?, phone_number = ?, password = ?, status = ? 
                     WHERE staff_id = ?
                 ");
-                $stmtUpdate->bind_param("ssssi", $username, $full_name, $hashed_pw, $status, $staff_id);
+                $stmtUpdate->bind_param("sssssi", $username, $full_name, $phone_number, $hashed_pw, $status, $staff_id);
             } else {
                 $stmtUpdate = $conn->prepare("
                     UPDATE delivery_staff 
-                    SET username = ?, full_name = ?, status = ? 
+                    SET username = ?, full_name = ?, phone_number = ?, status = ? 
                     WHERE staff_id = ?
                 ");
-                $stmtUpdate->bind_param("sssi", $username, $full_name, $status, $staff_id);
+                $stmtUpdate->bind_param("ssssi", $username, $full_name, $phone_number, $status, $staff_id);
             }
 
             if ($stmtUpdate->execute()) {
                 $success = "Staff updated successfully.";
                 // Refresh staff details
-                $stmtRefetch = $conn->prepare("SELECT staff_id, username, full_name, status FROM delivery_staff WHERE staff_id = ?");
+                $stmtRefetch = $conn->prepare("SELECT staff_id, username, full_name, phone_number, status FROM delivery_staff WHERE staff_id = ?");
                 $stmtRefetch->bind_param("i", $staff_id);
                 $stmtRefetch->execute();
                 $staff = $stmtRefetch->get_result()->fetch_assoc();
@@ -116,7 +136,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     border: 1.5px solid #d6d6f3;
     background: #f8f8fc;
     border-radius: 10px;
-    max-width: 460px;
+    max-width: 520px;
     margin: 42px auto 48px;
     padding: 28px 32px 30px;
     box-shadow: 0 4px 14px -6px rgba(40,60,120,.15);
@@ -237,6 +257,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         </div>
 
         <div class="form-row">
+            <label for="phone_number">Phone Number (MY)</label>
+            <input type="text"
+                   name="phone_number"
+                   id="phone_number"
+                   value="<?= h($staff['phone_number']) ?>"
+                   maxlength="11"
+                   minlength="10"
+                   pattern="^01[0-46-9][0-9]{7,8}$"
+                   placeholder="e.g. 0123456789"
+                   title="Valid Malaysian mobile (10 or 11 digits, starts with 01)">
+            <div class="hint">Optional. Digits only, must start with 01 (mobile), 10 or 11 digits.</div>
+        </div>
+
+        <div class="form-row">
             <label for="password">Password (optional)</label>
             <div class="password-wrapper">
                 <input type="password" name="password" id="password" minlength="6" placeholder="Leave blank to keep current">
@@ -253,7 +287,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     </svg>
                 </button>
             </div>
-            <div class="inline-note">Leave blank to keep existing password. (Stored securely with one-way hash.)</div>
+            <div class="inline-note">Leave blank to keep existing password.</div>
         </div>
 
         <div class="form-row">

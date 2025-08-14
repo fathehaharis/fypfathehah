@@ -1,80 +1,124 @@
 <?php
+/**************** DEVELOPMENT ERROR SWITCH ****************/
+ini_set('display_errors', 1);
+ini_set('display_startup_errors', 1);
+error_reporting(E_ALL);
+/**********************************************************/
+
 include '../connect.php';
 session_start();
 date_default_timezone_set('Asia/Kuala_Lumpur');
 
-// CSRF token
+/* Ensure DB connection */
+if (!isset($conn) || !($conn instanceof mysqli)) {
+    die('Database connection ($conn) is not a mysqli instance. Check connect.php.');
+}
+
+/* Column existence check (remove after confirmed) */
+$colCheck = $conn->query("SHOW COLUMNS FROM delivery_staff LIKE 'phone_number'");
+if (!$colCheck) {
+    die('Failed to inspect table delivery_staff: '.$conn->error);
+}
+if ($colCheck->num_rows === 0) {
+    die("Column phone_number missing. Run:\nALTER TABLE delivery_staff ADD COLUMN phone_number VARCHAR(20) NULL AFTER full_name;");
+}
+$colCheck->free();
+
+/* CSRF token */
 if (empty($_SESSION['csrf_token'])) {
     $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
 }
 $csrf_token = $_SESSION['csrf_token'];
 
-// Auth check
+/* Auth check */
 if (!isset($_SESSION['admin_id'])) {
     header("Location: admin_login.php");
     exit;
 }
 
+/* Malaysian phone validation */
+function isValidMYPhone($phone) {
+    $clean = preg_replace('/\D/', '', $phone);
+    return (bool)preg_match('/^01[0-46-9][0-9]{7,8}$/', $clean);
+}
+
 $flash = $error = $add_error = $add_success = "";
 
-// Handle delete staff
+/* Delete staff (legacy simple delete kept) */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_staff'], $_POST['staff_id'], $_POST['csrf_token'])) {
     if (!hash_equals($csrf_token, $_POST['csrf_token'])) {
         $error = "Invalid session token.";
     } else {
-        $staff_id = intval($_POST['staff_id']);
-        $stmt = $conn->prepare("DELETE FROM delivery_staff WHERE staff_id=?");
-        $stmt->bind_param("i", $staff_id);
-        $stmt->execute();
-        $stmt->close();
-        $flash = "Delivery staff deleted.";
-        header("Location: delivery_staff.php?flash=" . urlencode($flash));
-        exit;
-    }
-}
-
-// Handle add staff
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_staff'], $_POST['csrf_token'])) {
-    if (!hash_equals($csrf_token, $_POST['csrf_token'])) {
-        $add_error = "Invalid session token.";
-    } else {
-        $username = trim($_POST['username']);
-        $full_name = trim($_POST['full_name']);
-        $password = $_POST['password'];
-        $status = (isset($_POST['status']) && $_POST['status'] === 'inactive') ? 'inactive' : 'active';
-
-        if ($username == "" || $full_name == "" || $password == "") {
-            $add_error = "Please fill in all required fields.";
-        } else {
-            $stmt = $conn->prepare("SELECT staff_id FROM delivery_staff WHERE username = ?");
-            $stmt->bind_param("s", $username);
-            $stmt->execute();
-            $stmt->store_result();
-            if ($stmt->num_rows > 0) {
-                $add_error = "Username already exists.";
+        $staff_id = (int)$_POST['staff_id'];
+        if ($stmt = $conn->prepare("DELETE FROM delivery_staff WHERE staff_id=?")) {
+            $stmt->bind_param("i", $staff_id);
+            if (!$stmt->execute()) {
+                $error = "Delete failed: ".$stmt->error;
             } else {
-                $hashed_pw = password_hash($password, PASSWORD_DEFAULT);
-                $stmt2 = $conn->prepare("INSERT INTO delivery_staff (username, full_name, password, status) VALUES (?, ?, ?, ?)");
-                $stmt2->bind_param("ssss", $username, $full_name, $hashed_pw, $status);
-                if ($stmt2->execute()) {
-                    $add_success = "Delivery staff added successfully.";
-                } else {
-                    $add_error = "Error adding staff: " . $conn->error;
-                }
-                $stmt2->close();
+                $flash = "Delivery staff deleted.";
+                header("Location: delivery_staff.php?flash=" . urlencode($flash));
+                exit;
             }
             $stmt->close();
+        } else {
+            $error = "Prepare delete failed: ".$conn->error;
         }
     }
 }
 
-// Flash from GET
-if (isset($_GET['flash']) && $_GET['flash']) {
-    $flash = htmlspecialchars($_GET['flash']);
-}
-?>
-<?php include 'admin_header.php'; ?>
+/* Add staff */
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_staff'], $_POST['csrf_token'])) {
+    if (!hash_equals($csrf_token, $_POST['csrf_token'])) {
+        $add_error = "Invalid session token.";
+    } else {
+        $username     = trim($_POST['username'] ?? '');
+        $full_name    = trim($_POST['full_name'] ?? '');
+        $phone_number = trim($_POST['phone_number'] ?? '');
+        $password     = $_POST['password'] ?? '';
+        $status       = (isset($_POST['status']) && $_POST['status'] === 'inactive') ? 'inactive' : 'active';
 
+        if ($username === '' || $full_name === '' || $password === '') {
+            $add_error = "Please fill in all required fields.";
+        } elseif ($phone_number !== '' && !isValidMYPhone($phone_number)) {
+            $add_error = "Phone number invalid (MY format: starts 01, total 10/11 digits).";
+        } else {
+            if ($stmt = $conn->prepare("SELECT staff_id FROM delivery_staff WHERE username = ? LIMIT 1")) {
+                $stmt->bind_param("s", $username);
+                $stmt->execute();
+                $stmt->store_result();
+                if ($stmt->num_rows > 0) {
+                    $add_error = "Username already exists.";
+                }
+                $stmt->close();
+            } else {
+                $add_error = "Prepare check username failed: ".$conn->error;
+            }
+
+            if (!$add_error) {
+                $hashed_pw = password_hash($password, PASSWORD_DEFAULT);
+                if ($stmt2 = $conn->prepare("INSERT INTO delivery_staff (username, full_name, phone_number, password, status) VALUES (?, ?, ?, ?, ?)")) {
+                    $stmt2->bind_param("sssss", $username, $full_name, $phone_number, $hashed_pw, $status);
+                    if ($stmt2->execute()) {
+                        $add_success = "Delivery staff added successfully.";
+                    } else {
+                        $add_error = "Insert failed: ".$stmt2->error;
+                    }
+                    $stmt2->close();
+                } else {
+                    $add_error = "Prepare insert failed: ".$conn->error;
+                }
+            }
+        }
+    }
+}
+
+/* Flash from GET */
+if (isset($_GET['flash']) && $_GET['flash']) {
+    $flash = htmlspecialchars($_GET['flash'], ENT_QUOTES, 'UTF-8');
+}
+
+include 'admin_header.php';
+?>
 <style>
 body { background: #f7f9fa; }
 .staff-table { table-layout: fixed;width: 100%;border-collapse: collapse;margin:24px 0 40px 0;background: #fff;box-shadow: 0 2px 12px #e0e7ef55;border-radius: 12px;overflow: hidden;}
@@ -123,6 +167,14 @@ body { background: #f7f9fa; }
                 <input class="form-input" type="text" name="full_name" id="full_name" required maxlength="100">
             </div>
             <div class="form-row">
+                <label class="form-label" for="phone_number">Phone Number</label>
+                <input class="form-input" type="text" name="phone_number" id="phone_number"
+                    maxlength="11" minlength="10"
+                    pattern="^01[0-46-9][0-9]{7,8}$"
+                    placeholder="e.g. 0123456789"
+                    title="Enter a valid Malaysian mobile number (10 or 11 digits, starts with 01)">
+            </div>
+            <div class="form-row">
                 <label class="form-label" for="password">Password<span style="color:#d42d2d;">*</span></label>
                 <input class="form-input" type="password" name="password" id="password" required minlength="6">
             </div>
@@ -147,6 +199,7 @@ body { background: #f7f9fa; }
                 <th style="width:60px;">#</th>
                 <th style="width:140px;">Username</th>
                 <th style="width:180px;">Full Name</th>
+                <th style="width:140px;">Phone Number</th>
                 <th style="width:100px;">Status</th>
                 <th style="width:140px;">Action</th>
             </tr>
@@ -160,14 +213,13 @@ body { background: #f7f9fa; }
                 <td><?= $i++ ?></td>
                 <td><?= htmlspecialchars($staff['username']) ?></td>
                 <td><?= htmlspecialchars($staff['full_name']) ?></td>
+                <td><?= htmlspecialchars($staff['phone_number']) ?></td>
                 <td><?= htmlspecialchars(ucfirst($staff['status'])) ?></td>
                 <td style="display:flex;gap:7px;">
                     <a class="edit-btn" href="edit_delivery_staff.php?id=<?= $staff['staff_id'] ?>">Edit</a>
                     <form method="post" style="display:inline;" onsubmit="return confirm('Are you sure you want to delete this staff?');">
                         <input type="hidden" name="staff_id" value="<?= $staff['staff_id'] ?>">
                         <input type="hidden" name="csrf_token" value="<?= $csrf_token ?>">
-                        <button type="submit" name="delete_staff" class="delete-btn">Delete</button>
-                    </form>
                 </td>
             </tr>
         <?php endwhile; ?>

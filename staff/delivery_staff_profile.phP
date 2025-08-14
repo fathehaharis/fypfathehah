@@ -12,7 +12,12 @@ if (!isset($_SESSION['staff_id'])) {
 
 $staff_id = $_SESSION['staff_id'];
 
-// Handle profile update
+// Malaysian phone validation helper
+function isValidMYPhone($phone) {
+    $clean = preg_replace('/\D/', '', $phone);
+    return preg_match('/^01[0-46-9][0-9]{7,8}$/', $clean);
+}
+
 $success_msg_profile = $error_msg_profile = "";
 $success_msg_pwd = $error_msg_pwd = "";
 
@@ -20,10 +25,13 @@ $success_msg_pwd = $error_msg_pwd = "";
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_profile'])) {
     $full_name = trim($_POST['full_name']);
     $username = trim($_POST['username']);
+    $phone_number = trim($_POST['phone_number']);
     $status = ($_POST['status'] === 'inactive') ? 'inactive' : 'active';
 
     if ($full_name == "" || $username == "") {
         $error_msg_profile = "Full name and username cannot be empty.";
+    } elseif ($phone_number != "" && !isValidMYPhone($phone_number)) {
+        $error_msg_profile = "Phone number must be a valid Malaysian mobile number (10 or 11 digits, starts with 01).";
     } else {
         // Check if username is taken by someone else
         $stmt = $conn->prepare("SELECT staff_id FROM delivery_staff WHERE username = ? AND staff_id != ?");
@@ -33,9 +41,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_profile'])) {
         if ($stmt->num_rows > 0) {
             $error_msg_profile = "Username is already taken by another user.";
         } else {
-            // Update profile
-            $stmt2 = $conn->prepare("UPDATE delivery_staff SET full_name = ?, username = ?, status = ? WHERE staff_id = ?");
-            $stmt2->bind_param("sssi", $full_name, $username, $status, $staff_id);
+            // Update profile (include phone_number)
+            $stmt2 = $conn->prepare("UPDATE delivery_staff SET full_name = ?, username = ?, phone_number = ?, status = ? WHERE staff_id = ?");
+            $stmt2->bind_param("ssssi", $full_name, $username, $phone_number, $status, $staff_id);
             if ($stmt2->execute()) {
                 $success_msg_profile = "Profile updated successfully.";
                 $_SESSION['staff_name'] = $full_name;
@@ -92,11 +100,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_password'])) {
     }
 }
 
-// Fetch staff profile
-$stmt = $conn->prepare("SELECT username, full_name, status FROM delivery_staff WHERE staff_id = ?");
+// Fetch staff profile (include phone_number)
+$stmt = $conn->prepare("SELECT username, full_name, phone_number, status FROM delivery_staff WHERE staff_id = ?");
 $stmt->bind_param("i", $staff_id);
 $stmt->execute();
-$stmt->bind_result($username, $full_name, $status);
+$stmt->bind_result($username, $full_name, $phone_number, $status);
 $stmt->fetch();
 $stmt->close();
 
@@ -172,6 +180,14 @@ include 'staff_header.php';
         <div class="form-row">
             <label for="full_name">Full Name</label>
             <input type="text" name="full_name" value="<?= htmlspecialchars($full_name) ?>" maxlength="100" required>
+        </div>
+        <div class="form-row">
+            <label for="phone_number">Phone Number</label>
+            <input type="text" name="phone_number" value="<?= htmlspecialchars($phone_number) ?>"
+                   maxlength="11" minlength="10"
+                   pattern="^01[0-46-9][0-9]{7,8}$"
+                   placeholder="e.g. 0123456789"
+                   title="Enter a valid Malaysian mobile number (10 or 11 digits, starts with 01)">
         </div>
         <div class="form-row">
             <label for="status">Status</label>

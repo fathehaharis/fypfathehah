@@ -98,7 +98,6 @@ if (!$pay || !$booking) {
         </tr>
     </table>
     <div class="note">You may print or save this receipt for your records.</div>
-<button onclick="window.print()" class="pay-btn">Print Receipt</button>
 <a href="payment_receipt_blob.php?payment_id=<?= htmlspecialchars($pay['payment_id']) ?>" target="_blank" class="pay-btn" style="display:inline-block;margin-top:12px;">
     Download/View PDF Receipt
 </a>
