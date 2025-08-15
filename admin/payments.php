@@ -1,33 +1,18 @@
 <?php
 /**************************************************************
  * payments.php (ADMIN)
- * Mode: Deposit Refund + Rental Fee Refund + Search + Pagination + Highlights
+ * (Updated: Added links to deposit / rental refund receipts)
  *
- * Features:
- *  1. List payments (joined with booking, customer, car)
- *  2. Search & filter:
- *       - q: booking id / payment id / customer name (LIKE) / plate (LIKE)
- *       - deposit_status filter (optional)
- *       - show=actionable (only rows needing admin action)
- *  3. Pagination (page param, 25 per page by default)
- *  4. Create deposit refund row (reference_code = DEP-{booking_id}) IF:
- *         booking.deposit_status='pending_refund'
- *         security_deposit_refund > 0
- *         no existing deposit refund row
- *  5. Process deposit refund row (sets refunds.refund_status='processed' AND booking.deposit_status='refunded')
- *     - Sends SMTP email to customer upon processing.
- *  6. Process rental refund row (refunds.refund_status='pending' AND reference_code = RENTAL-{booking_id}, sets to 'processed')
- *     - Sends SMTP email to customer upon processing.
+ * NOTE (Update):
+ *   The "Receipt" column now shows:
+ *     - Payment receipt (existing)
+ *     - Deposit Refund Receipt (if deposit refund processed)
+ *     - Rental Refund Receipt (if rental refund processed)
  *
- * Highlighting:
- *  - Row class highlight-create: deposit_status pending_refund AND no refund row yet
- *  - Row class highlight-process: deposit refund row exists & refund_status pending
- *  - Row class highlight-rental-process: rental refund row pending
- *
- * Safety:
- *  - All mutations via POST + CSRF token
- *  - No GET side-effects
- *
+ *   To avoid loading large BLOBs for every row, we just show links
+ *   when the refund status is 'processed'. If you want to only show
+ *   links when a receipt blob actually exists, you can modify the
+ *   SELECT to include IF(dr.refund_receipt_blob IS NULL,0,1) flags.
  **************************************************************/
 declare(strict_types=1);
 session_start();
@@ -39,67 +24,13 @@ if (empty($_SESSION['admin_id'])) {
     exit;
 }
 
-/* ---------- SMTP (PHPMailer) helper ---------- */
-require_once __DIR__ . '/../vendor/autoload.php';
-use PHPMailer\PHPMailer\PHPMailer;
-use PHPMailer\PHPMailer\Exception;
-
-/**
- * Send an email via SMTP (PHPMailer).
- * Configure with environment variables:
- *   SMTP_HOST, SMTP_PORT, SMTP_SECURE (tls|ssl|''), SMTP_USERNAME, SMTP_PASSWORD,
- *   SMTP_FROM_EMAIL, SMTP_FROM_NAME, SMTP_REPLY_TO, SMTP_REPLY_TO_NAME
- * For Gmail, set FROM to the same address as SMTP_USERNAME and use an App Password.
- */
-function send_mail_smtp(string $toEmail, string $toName, string $subject, string $html, string $altText = ''): array {
-    $host     = getenv('SMTP_HOST') ?: 'smtp.gmail.com';
-    $port     = (int)(getenv('SMTP_PORT') ?: 587);
-    $secure   = getenv('SMTP_SECURE') ?: 'tls';
-    $username = getenv('SMTP_USERNAME') ?: 'fathehaharis69@gmail.com';
-    $password = getenv('SMTP_PASSWORD') ?: 'cuel ijeu lzqv vsgv';
-    $fromEmail= getenv('SMTP_FROM_EMAIL') ?: $username; // Gmail requires from == username
-    $fromName = getenv('SMTP_FROM_NAME') ?: 'TimeLess Car Rental';
-    $replyTo  = getenv('SMTP_REPLY_TO') ?: $fromEmail;
-    $replyNm  = getenv('SMTP_REPLY_TO_NAME') ?: $fromName;
-
-    if (!class_exists(PHPMailer::class)) {
-        return [false, 'PHPMailer not installed. Run: composer require phpmailer/phpmailer'];
-    }
-
-    try {
-        $mail = new PHPMailer(true);
-        $mail->isSMTP();
-        $mail->Host       = $host;
-        $mail->SMTPAuth   = true;
-        $mail->Username   = $username;
-        $mail->Password   = $password;
-        if ($secure) $mail->SMTPSecure = $secure; // tls or ssl
-        $mail->Port       = $port;
-        $mail->CharSet    = 'UTF-8';
-
-        $mail->setFrom($fromEmail, $fromName);
-        $mail->addReplyTo($replyTo, $replyNm);
-        $mail->addAddress($toEmail, $toName);
-
-        $mail->isHTML(true);
-        $mail->Subject = $subject;
-        $mail->Body    = $html;
-        $mail->AltBody = $altText !== '' ? $altText : strip_tags(str_replace(['<br>','<br/>','<br />'], "\n", $html));
-
-        $mail->send();
-        return [true, ''];
-    } catch (Throwable $e) {
-        return [false, $e->getMessage()];
-    }
-}
-
-/* ---------- CSRF Token ---------- */
+/* ---------- CSRF Token (for creating deposit refund row) ---------- */
 if (empty($_SESSION['csrf_token'])) {
     $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
 }
 $csrf = $_SESSION['csrf_token'];
 
-/* ---------- Helpers ---------- */
+/* ---------- Helper Functions ---------- */
 function e($v): string { return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
 function toAmount($v): float {
     if (is_int($v) || is_float($v)) return (float)$v;
@@ -118,15 +49,13 @@ $flash = '';
 $error = '';
 
 /* =========================================================
- * POST (Deposit Refund + Rental Refund)
+ * POST: ONLY Create Deposit Refund Row
  * ========================================================= */
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!isset($_POST['csrf_token']) || !hash_equals($csrf, $_POST['csrf_token'])) {
         $error = 'Invalid session token.';
-    } elseif (isset($_POST['refund_action'])) {
-        $action     = $_POST['refund_action'];
+    } elseif (isset($_POST['refund_action']) && $_POST['refund_action'] === 'create_deposit_refund') {
         $booking_id = (int)($_POST['booking_id'] ?? 0);
-
         if ($booking_id <= 0) {
             $error = 'Invalid booking.';
         } else {
@@ -135,9 +64,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                        security_deposit_refund,
                        deposit_status,
                        security_deposit,
-                       security_deposit_deduction,
-                       total_price,
-                       status AS booking_status
+                       security_deposit_deduction
                   FROM booking
                  WHERE booking_id=? LIMIT 1
             ");
@@ -150,209 +77,53 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $error = 'Booking not found.';
             } else {
                 $depRefCode = 'DEP-'.$booking_id;
-                $rentRefCode = 'RENTAL-'.$booking_id;
 
-                // Deposit refund row
                 $rx = $conn->prepare("
-                    SELECT refund_id, refund_status, amount, notes, created_at, processed_at
-                      FROM refunds
+                    SELECT refund_id FROM refunds
                      WHERE booking_id=? AND reference_code=? LIMIT 1
                 ");
                 $rx->bind_param('is', $booking_id, $depRefCode);
                 $rx->execute();
-                $depositRefundRow = $rx->get_result()->fetch_assoc();
+                $existing = $rx->get_result()->fetch_assoc();
                 $rx->close();
 
-                // Rental refund row
-                $rrx = $conn->prepare("
-                    SELECT refund_id, refund_status, amount, notes, created_at, processed_at
-                      FROM refunds
-                     WHERE booking_id=? AND reference_code=? LIMIT 1
-                ");
-                $rrx->bind_param('is', $booking_id, $rentRefCode);
-                $rrx->execute();
-                $rentalRefundRow = $rrx->get_result()->fetch_assoc();
-                $rrx->close();
+                if (($bk['deposit_status'] ?? '') !== 'pending_refund') {
+                    $error = 'Deposit not in pending_refund state.';
+                } elseif (toAmount($bk['security_deposit_refund']) <= 0) {
+                    $error = 'No refundable deposit amount.';
+                } elseif ($existing) {
+                    $error = 'Deposit refund row already exists.';
+                } else {
+                    $amount = toAmount($bk['security_deposit_refund']);
+                    $ded    = toAmount($bk['security_deposit_deduction']);
+                    $base   = toAmount($bk['security_deposit']);
+                    $rate   = $base > 0 ? $amount / $base : 0;
+                    $notes  = $ded > 0
+                        ? 'Deposit refund after deduction RM '.nf($ded)
+                        : 'Deposit refund';
 
-                // -------- Create Deposit Refund Row --------
-                if ($action === 'create_deposit_refund') {
-                    if (($bk['deposit_status'] ?? '') !== 'pending_refund') {
-                        $error = 'Deposit not in pending_refund state.';
-                    } elseif (toAmount($bk['security_deposit_refund']) <= 0) {
-                        $error = 'No refundable deposit amount.';
-                    } elseif ($depositRefundRow) {
-                        $error = 'Deposit refund row already exists.';
+                    $ins = $conn->prepare("
+                        INSERT INTO refunds
+                          (booking_id, cust_id, amount, refund_status, reference_code, notes,
+                           refund_rate, base_amount, created_at)
+                        VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, NOW())
+                    ");
+                    $ins->bind_param(
+                        'iidssdd',
+                        $booking_id,
+                        $bk['cust_id'],
+                        $amount,
+                        $depRefCode,
+                        $notes,
+                        $rate,
+                        $base
+                    );
+                    if ($ins->execute()) {
+                        $flash = 'Deposit refund row created.';
                     } else {
-                        $amount = toAmount($bk['security_deposit_refund']);
-                        $ded    = toAmount($bk['security_deposit_deduction']);
-                        $base   = toAmount($bk['security_deposit']);
-                        $rate   = $base > 0 ? $amount / $base : 0;
-                        $notes  = $ded > 0
-                            ? 'Deposit refund after deduction RM '.nf($ded)
-                            : 'Deposit refund';
-
-                        $ins = $conn->prepare("
-                            INSERT INTO refunds
-                              (booking_id, cust_id, amount, refund_status, reference_code, notes,
-                               refund_rate, base_amount, created_at)
-                            VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, NOW())
-                        ");
-                        $ins->bind_param(
-                            'iidssdd',
-                            $booking_id,
-                            $bk['cust_id'],
-                            $amount,
-                            $depRefCode,
-                            $notes,
-                            $rate,
-                            $base
-                        );
-                        if ($ins->execute()) {
-                            $flash = 'Deposit refund row created.';
-                        } else {
-                            $error = 'Failed to create deposit refund: '.$conn->error;
-                        }
-                        $ins->close();
+                        $error = 'Failed to create deposit refund: '.$conn->error;
                     }
-                }
-
-                // -------- Process Deposit Refund Row --------
-                if (!$error && $action === 'process_deposit_refund') {
-                    $refund_id = (int)($_POST['refund_id'] ?? 0);
-                    if (!$depositRefundRow || $refund_id !== (int)$depositRefundRow['refund_id']) {
-                        $error = 'Deposit refund row not found.';
-                    } elseif ($depositRefundRow['refund_status'] !== 'pending') {
-                        $error = 'Refund not pending.';
-                    } elseif (($bk['deposit_status'] ?? '') !== 'pending_refund') {
-                        $error = 'Booking deposit not pending_refund.';
-                    } else {
-                        $conn->begin_transaction();
-                        try {
-                            $u1 = $conn->prepare("
-                                UPDATE refunds
-                                   SET refund_status='processed',
-                                       processed_at=NOW(),
-                                       user_unread=1
-                                 WHERE refund_id=? LIMIT 1
-                            ");
-                            $u1->bind_param('i', $refund_id);
-                            $u1->execute();
-                            $u1->close();
-
-                            $u2 = $conn->prepare("
-                                UPDATE booking
-                                   SET deposit_status='refunded',
-                                       deposit_last_adjusted_at=NOW(),
-                                       updated_at=NOW()
-                                 WHERE booking_id=? LIMIT 1
-                            ");
-                            $u2->bind_param('i', $booking_id);
-                            $u2->execute();
-                            $u2->close();
-
-                            $conn->commit();
-
-                            // Email the customer (post-commit)
-                            $custEmail = '';
-                            $custName  = 'Customer';
-                            $cst = $conn->prepare("SELECT email, full_name FROM customer WHERE cust_id=? LIMIT 1");
-                            $cst->bind_param('i', $bk['cust_id']);
-                            $cst->execute();
-                            $cst->bind_result($custEmail, $custName);
-                            $cst->fetch();
-                            $cst->close();
-
-                            $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') ? 'https' : 'http';
-                            $host   = $_SERVER['HTTP_HOST'] ?? 'localhost';
-
-
-                            $amountStr = nf($depositRefundRow['amount']);
-                            $subject = "Deposit Refund Processed – Booking #{$booking_id}";
-                            $html = "
-                                <div style='font-family:Arial,sans-serif;font-size:14px;color:#222'>
-                                  <p>Hi ".e($custName).",</p>
-                                  <p>Your deposit refund for booking <strong>#{$booking_id}</strong> has been <strong>processed</strong>.</p>
-                                  <p>
-                                    <strong>Reference:</strong> ".e($depRefCode)."<br>
-                                    <strong>Amount:</strong> RM ".e($amountStr)."
-                                  </p>
-                                  <p style='color:#555'>Thank you for choosing TimeLess Car Rental.</p>
-                                </div>
-                            ";
-                            $mailOk = true; $mailErr = '';
-                            if ($custEmail) {
-                                [$mailOk, $mailErr] = send_mail_smtp($custEmail, $custName ?: 'Customer', $subject, $html);
-                            }
-                            $flash = 'Deposit refund processed.' . ($mailOk ? ' Email sent.' : (' Email not sent: '.$mailErr));
-                        } catch (Throwable $ex) {
-                            $conn->rollback();
-                            $error = 'Failed to process deposit refund: '.$ex->getMessage();
-                        }
-                    }
-                }
-
-                // -------- Process Rental Refund Row --------
-                if (!$error && $action === 'process_rental_refund') {
-                    $refund_id = (int)($_POST['refund_id'] ?? 0);
-                    if (!$rentalRefundRow || $refund_id !== (int)$rentalRefundRow['refund_id']) {
-                        $error = 'Rental refund row not found or already processed.';
-                    } elseif ($rentalRefundRow['refund_status'] !== 'pending') {
-                        $error = 'Rental refund not pending.';
-                    } else {
-                        $conn->begin_transaction();
-                        try {
-                            $u1 = $conn->prepare("
-                                UPDATE refunds
-                                   SET refund_status='processed',
-                                       processed_at=NOW(),
-                                       user_unread=1
-                                 WHERE refund_id=? LIMIT 1
-                            ");
-                            $u1->bind_param('i', $refund_id);
-                            $u1->execute();
-                            $u1->close();
-
-                            // Optionally: mark booking as "rental_refunded" or add a log.
-
-                            $conn->commit();
-
-                            // Email the customer (post-commit)
-                            $custEmail = '';
-                            $custName  = 'Customer';
-                            $cst = $conn->prepare("SELECT email, full_name FROM customer WHERE cust_id=? LIMIT 1");
-                            $cst->bind_param('i', $bk['cust_id']);
-                            $cst->execute();
-                            $cst->bind_result($custEmail, $custName);
-                            $cst->fetch();
-                            $cst->close();
-
-                            $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') ? 'https' : 'http';
-                            $host   = $_SERVER['HTTP_HOST'] ?? 'localhost';
-                            $refUrl = $scheme.'://'.$host.'/customer/my_refunds.php';
-
-                            $amountStr = nf($rentalRefundRow['amount']);
-                            $subject = "Rental Refund Processed – Booking #{$booking_id}";
-                            $html = "
-                                <div style='font-family:Arial,sans-serif;font-size:14px;color:#222'>
-                                  <p>Hi ".e($custName).",</p>
-                                  <p>Your rental refund for booking <strong>#{$booking_id}</strong> has been <strong>processed</strong>.</p>
-                                  <p>
-                                    <strong>Reference:</strong> ".e($rentRefCode)."<br>
-                                    <strong>Amount:</strong> RM ".e($amountStr)."
-                                  </p>
-                                  <p style='color:#555'>Thank you for choosing TimeLess Car Rental.</p>
-                                </div>
-                            ";
-                            $mailOk = true; $mailErr = '';
-                            if ($custEmail) {
-                                [$mailOk, $mailErr] = send_mail_smtp($custEmail, $custName ?: 'Customer', $subject, $html);
-                            }
-                            $flash = 'Rental refund processed.' . ($mailOk ? ' Email sent.' : (' Email not sent: '.$mailErr));
-                        } catch (Throwable $ex) {
-                            $conn->rollback();
-                            $error = 'Failed to process rental refund: '.$ex->getMessage();
-                        }
-                    }
+                    $ins->close();
                 }
             }
         }
@@ -409,7 +180,6 @@ if ($showAction) {
     )";
 }
 
-/* Build WHERE clause */
 $whereSQL = $where ? ('WHERE '.implode(' AND ', $where)) : '';
 
 /* =========================================================
@@ -427,7 +197,8 @@ LEFT JOIN refunds dr
 LEFT JOIN refunds rr
        ON rr.booking_id = p.booking_id
       AND rr.reference_code = CONCAT('RENTAL-', p.booking_id)
-".$whereSQL;
+$whereSQL
+";
 
 $countStmt = $conn->prepare($countSQL);
 if ($types !== '') {
@@ -443,6 +214,7 @@ $offset = ($page - 1) * $perPage;
 
 /* =========================================================
  * MAIN DATA QUERY
+ * (No BLOBs selected to keep listing light)
  * ========================================================= */
 $dataSQL = "
 SELECT
@@ -490,8 +262,6 @@ LIMIT ? OFFSET ?
 ";
 
 $dataStmt = $conn->prepare($dataSQL);
-
-/* Bind dynamic filters + limit/offset */
 if ($types !== '') {
     $bindTypes = $types.'ii';
     $paramsWithLimit = $params;
@@ -501,7 +271,6 @@ if ($types !== '') {
 } else {
     $dataStmt->bind_param('ii', $perPage, $offset);
 }
-
 $dataStmt->execute();
 $result = $dataStmt->get_result();
 
@@ -558,8 +327,8 @@ th { background:#f0f4fa; font-weight:700; font-size:.6rem; letter-spacing:.45px;
     letter-spacing:.4px; box-shadow:0 2px 6px rgba(0,0,0,.12);
 }
 .action-form button:hover { background:#5933a1; }
-.action-form .process { background:#2d5fd6; }
-.action-form .process:hover { background:#1f4fab; }
+.action-form button.process { background:#2d5fd6; }
+.action-form button.process:hover { background:#1f4fab; }
 tr.highlight-create { background:linear-gradient(90deg,#fffbe6,#fff4c2); }
 tr.highlight-process { background:linear-gradient(90deg,#eaf3ff,#d6e9ff); }
 tr.highlight-rental-process { background:linear-gradient(90deg,#d9ffe6,#b3ffc9); }
@@ -576,35 +345,24 @@ tr.highlight-rental-process { background:linear-gradient(90deg,#d9ffe6,#b3ffc9);
 }
 .pagination span.current { background:#2d5fd6; color:#fff; border-color:#2d5fd6; }
 .pagination a:hover { background:#eef3fa; }
-.report-breadcrumb {
-    font-size: 1em;
-    color: #92a2b3;
-    margin-bottom: 10px;
+.report-breadcrumb { font-size: 1em; color: #92a2b3; margin-bottom: 10px; }
+.report-breadcrumb a { color: #2b5cbc; text-decoration: none; font-weight: 700; }
+.report-breadcrumb .inactive { color: #92a2b3; font-weight: 400; text-decoration: none; }
+.report-breadcrumb .active { color: #254d84; font-weight: 600; }
+.receipt-links a {
+    display:block;
+    text-decoration:none;
+    color:#2d5fd6;
+    font-weight:600;
+    font-size:.62rem;
+    margin:2px 0;
 }
-.report-breadcrumb a {
-    color: #2b5cbc;
-    text-decoration: none;
-    font-weight: 700;
-}
-.report-breadcrumb .inactive {
-    color: #92a2b3;
-    font-weight: 400;
-    text-decoration: none;
-}
-.report-breadcrumb .active {
-    color: #254d84;
-    font-weight: 600;
-    text-decoration: none;
-}
-@media (max-width:1100px){
-  .wrapper { padding:24px 20px 54px; }
-  table { min-width:1180px; }
-}
+.receipt-links a:hover { text-decoration:underline; }
 </style>
 </head>
 <body>
 <div class="wrapper">
-        <div class="report-breadcrumb">
+    <div class="report-breadcrumb">
         <a href="admin_dashboard.php" class="active">Dashboard</a>
         <span> / </span>
         <span class="inactive">Payments</span>
@@ -618,7 +376,7 @@ tr.highlight-rental-process { background:linear-gradient(90deg,#d9ffe6,#b3ffc9);
         <form method="get">
             <div>
                 <label style="display:block;font-size:.55rem;color:#516072;font-weight:600;letter-spacing:.4px;">Search</label>
-                <input type="text" name="q" value="<?= e($q) ?>" placeholder="Booking/Payment ID, Customer, Plate">
+                <input type="text" name="q" value="<?= e($q) ?>" placeholder="Booking/Payment ID, Customer, Plate, Brand">
             </div>
             <div>
                 <label style="display:block;font-size:.55rem;color:#516072;font-weight:600;letter-spacing:.4px;">Deposit Status</label>
@@ -646,8 +404,8 @@ tr.highlight-rental-process { background:linear-gradient(90deg,#d9ffe6,#b3ffc9);
     </div>
 
     <div class="legend">
-        <span><em class="l-process"></em> Pending deposit refund row (process)</span>
-        <span><em class="l-rental-process"></em> Pending rental refund row (process)</span>
+        <span><em class="l-process"></em> Pending deposit refund row</span>
+        <span><em class="l-rental-process"></em> Pending rental refund row</span>
         <span>Total: <?= (int)$total ?> | Page <?= $page ?> / <?= $totalPages ?></span>
     </div>
 
@@ -665,7 +423,7 @@ tr.highlight-rental-process { background:linear-gradient(90deg,#d9ffe6,#b3ffc9);
                 <th>Deposit Refund</th>
                 <th>Rental Refund</th>
                 <th>Method / Paid Date</th>
-                <th>Receipt</th>
+                <th>Receipt(s)</th>
             </tr>
             </thead>
             <tbody>
@@ -746,12 +504,11 @@ tr.highlight-rental-process { background:linear-gradient(90deg,#d9ffe6,#b3ffc9);
                             } elseif ($depRefStatus === 'pending') {
                                 $depositCell .= '<div class="small-note">Pending Row (RM '.nf($depRefAmount).')</div>';
                                 $depositCell .= '
-                                  <form class="action-form" method="post">
-                                    <input type="hidden" name="csrf_token" value="'.$csrf.'">
-                                    <input type="hidden" name="booking_id" value="'.$bookingId.'">
-                                    <input type="hidden" name="refund_id" value="'.(int)$depRefId.'">
-                                    <button type="submit" name="refund_action" value="process_deposit_refund" class="process">Process Refund</button>
-                                  </form>';
+                                  <div class="action-form">
+                                    <a href="process_refund.php?type=deposit&booking_id='.$bookingId.'">
+                                      <button type="button" class="process">Process Refund</button>
+                                    </a>
+                                  </div>';
                             } else {
                                 $depositCell .= '<div class="small-note">Refund '.e($depRefStatus).'</div>';
                             }
@@ -772,12 +529,11 @@ tr.highlight-rental-process { background:linear-gradient(90deg,#d9ffe6,#b3ffc9);
                             $rentalRefundCell .= '<div class="inline-sub">Status: '.e($rentalRefStatus).'</div>';
                             if ($rentalRefStatus === 'pending') {
                                 $rentalRefundCell .= '
-                                  <form class="action-form" method="post">
-                                    <input type="hidden" name="csrf_token" value="'.$csrf.'">
-                                    <input type="hidden" name="booking_id" value="'.$bookingId.'">
-                                    <input type="hidden" name="refund_id" value="'.(int)$rentalRefId.'">
-                                    <button type="submit" name="refund_action" value="process_rental_refund" class="process">Process Rental Refund</button>
-                                  </form>';
+                                  <div class="action-form">
+                                    <a href="process_refund.php?type=rental&refund_id='.(int)$rentalRefId.'">
+                                      <button type="button" class="process">Process Rental Refund</button>
+                                    </a>
+                                  </div>';
                             } elseif ($rentalRefStatus === 'processed') {
                                 $rentalRefundCell .= '<div class="small-note">Refund processed.</div>';
                                 if ($rentalRefProcessed) {
@@ -787,6 +543,22 @@ tr.highlight-rental-process { background:linear-gradient(90deg,#d9ffe6,#b3ffc9);
                         } else {
                             $rentalRefundCell .= '<div class="small-note">-</div>';
                         }
+
+                        /* Receipt links column */
+                        $receiptLinks = '<div class="receipt-links">';
+                        if (!empty($row['payment_id'])) {
+                            $receiptLinks .= '<a href="/customer/payment_receipt_blob.php?payment_id='.e($row['payment_id']).'" target="_blank">Payment Receipt</a>';
+                        }
+                        if ($depRefId && $depRefStatus === 'processed') {
+                            $receiptLinks .= '<a href="refund_receipt.php?id='.e($depRefId).'" target="_blank">Deposit Refund Receipt</a>';
+                        }
+                        if ($rentalRefId && $rentalRefStatus === 'processed') {
+                            $receiptLinks .= '<a href="refund_receipt.php?id='.e($rentalRefId).'" target="_blank">Rental Refund Receipt</a>';
+                        }
+                        if ($receiptLinks === '<div class="receipt-links">') {
+                            $receiptLinks .= '<span style="color:#b2b2b2;">-</span>';
+                        }
+                        $receiptLinks .= '</div>';
                     ?>
                     <tr class="<?= e($rowClass) ?>">
                         <td><?= e($row['payment_id']) ?></td>
@@ -810,15 +582,7 @@ tr.highlight-rental-process { background:linear-gradient(90deg,#d9ffe6,#b3ffc9);
                                 <?= e($row['payment_date'] ?? '-') ?>
                             </span>
                         </td>
-                        <td>
-                            <?php if (!empty($row['payment_id'])): ?>
-                                <a href="/customer/payment_receipt_blob.php?payment_id=<?= e($row['payment_id']) ?>" target="_blank" style="font-size:.92em; color:#2d5fd6; font-weight:600; text-decoration:none;">
-                                    View Receipt
-                                </a>
-                            <?php else: ?>
-                                <span style="color:#b2b2b2;">-</span>
-                            <?php endif; ?>
-                        </td>
+                        <td><?= $receiptLinks ?></td>
                     </tr>
                 <?php endwhile; ?>
             <?php else: ?>
@@ -831,7 +595,6 @@ tr.highlight-rental-process { background:linear-gradient(90deg,#d9ffe6,#b3ffc9);
     <?php if ($totalPages > 1): ?>
         <div class="pagination">
             <?php
-            // Build base query string without page
             $qs = $_GET;
             unset($qs['page']);
             $base = 'payments.php';
@@ -840,13 +603,11 @@ tr.highlight-rental-process { background:linear-gradient(90deg,#d9ffe6,#b3ffc9);
                 return $base.'?'.http_build_query($qs);
             };
 
-            // First / Prev
             if ($page > 1) {
                 echo '<a href="'.e($buildLink(1)).'">&laquo; First</a>';
                 echo '<a href="'.e($buildLink($page-1)).'">&lsaquo; Prev</a>';
             }
 
-            // Window
             $start = max(1, $page - 3);
             $end   = min($totalPages, $page + 3);
             for ($p=$start; $p <= $end; $p++) {
@@ -857,7 +618,6 @@ tr.highlight-rental-process { background:linear-gradient(90deg,#d9ffe6,#b3ffc9);
                 }
             }
 
-            // Next / Last
             if ($page < $totalPages) {
                 echo '<a href="'.e($buildLink($page+1)).'">Next &rsaquo;</a>';
                 echo '<a href="'.e($buildLink($totalPages)).'">Last &raquo;</a>';

@@ -306,6 +306,7 @@ if (session_status() === PHP_SESSION_NONE) {
       <button class="profile-btn" title="Profile"><span>👤</span></button>
       <div class="profile-menu">
         <a href="/customer/profile.php">Profile</a>
+        <a href="/customer/bank_details.php">Bank Details</a>
         <a href="/customer/bookings.php">My Bookings</a>
         <a href="/customer/dashboard.php">Dashboard</a>
         <a href="/customer/logout.php" class="logout-link">Logout</a>
