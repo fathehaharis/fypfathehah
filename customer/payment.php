@@ -184,6 +184,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['pay_now'])) {
     }
 
     $payment_method = isset($_POST['payment_method']) ? trim((string)$_POST['payment_method']) : 'Manual';
+    $bank_choice = isset($_POST['online_bank']) ? trim((string)$_POST['online_bank']) : '';
+
+    // Enforce bank selection for Online Banking
+    if ($payment_method === 'Online Banking') {
+        if ($bank_choice === '') {
+            $_SESSION['pay_error'] = "Please select a bank for Online Banking.";
+            header("Location: payment.php?booking_id=".$booking_id);
+            exit;
+        }
+    }
 
     if ($payment_method === 'Credit/Debit Card') {
         $card_number_raw = (string)($_POST['card_number'] ?? '');
@@ -250,7 +260,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['pay_now'])) {
     $method_display = $payment_method;
 
     // Extra fields (for display only)
-    $bank_choice = isset($_POST['online_bank']) ? trim((string)$_POST['online_bank']) : '';
     if ($payment_method === 'Online Banking' && $bank_choice) {
         $method_display .= ' - ' . $bank_choice;
     }
@@ -481,7 +490,7 @@ include '../includes/header.php';
             </select>
 
             <!-- Online Banking Banks (hidden by default) -->
-            <select name="online_bank" id="online_bank" class="bank-select" style="display:none;">
+            <select name="online_bank" id="online_bank" class="bank-select" style="display:none;" disabled>
                 <option value="">-- Select Bank --</option>
                 <option value="Maybank">Maybank</option>
                 <option value="CIMB">CIMB</option>
@@ -494,6 +503,7 @@ include '../includes/header.php';
                 <option value="OCBC">OCBC</option>
                 <option value="HSBC">HSBC</option>
             </select>
+            <div id="online_bank_error" class="error" style="display:none; text-align:left;">Please select a bank.</div>
 
             <!-- Credit Card Inputs (hidden by default) -->
             <div id="credit_details" style="display:none; text-align:left;">
@@ -547,6 +557,7 @@ include '../includes/header.php';
         <script>
         const paymentMethod = document.getElementById('payment_method');
         const bankSelect = document.getElementById('online_bank');
+        const bankErrorEl = document.getElementById('online_bank_error');
         const creditDiv = document.getElementById('credit_details');
 
         const cardNumberEl = document.getElementById('card_number');
@@ -686,9 +697,18 @@ include '../includes/header.php';
             return a && b && c;
         }
 
+        function validateBankIfVisible() {
+            if (bankSelect.style.display === 'none') return true;
+            const ok = bankSelect.value !== '';
+            bankErrorEl.style.display = ok ? 'none' : 'block';
+            return ok;
+        }
+
         function updatePaymentForm() {
             if (paymentMethod.value === 'Online Banking') {
                 bankSelect.style.display = '';
+                bankSelect.disabled = false;
+                bankSelect.required = true;
                 creditDiv.style.display = 'none';
                 // Clear card inputs/errors
                 cardNumberEl.value = '';
@@ -700,11 +720,17 @@ include '../includes/header.php';
                 cardBrandEl.style.display = 'none';
             } else if (paymentMethod.value === 'Credit/Debit Card') {
                 bankSelect.style.display = 'none';
+                bankSelect.disabled = true;
+                bankSelect.required = false;
                 bankSelect.value = '';
+                bankErrorEl.style.display = 'none';
                 creditDiv.style.display = '';
             } else {
                 bankSelect.style.display = 'none';
+                bankSelect.disabled = true;
+                bankSelect.required = false;
                 bankSelect.value = '';
+                bankErrorEl.style.display = 'none';
                 creditDiv.style.display = 'none';
                 // Clear card inputs/errors
                 cardNumberEl.value = '';
@@ -716,11 +742,26 @@ include '../includes/header.php';
                 cardBrandEl.style.display = 'none';
             }
             // Enable/disable button
-            payBtn.disabled = (paymentMethod.value === 'Credit/Debit Card') ? !validateCardSectionIfVisible() : false;
+            if (paymentMethod.value === 'Credit/Debit Card') {
+                payBtn.disabled = !validateCardSectionIfVisible();
+            } else if (paymentMethod.value === 'Online Banking') {
+                payBtn.disabled = !validateBankIfVisible();
+            } else {
+                payBtn.disabled = false;
+            }
         }
 
         paymentMethod.addEventListener('change', updatePaymentForm);
         window.addEventListener('DOMContentLoaded', updatePaymentForm);
+
+        if (bankSelect) {
+            bankSelect.addEventListener('change', () => {
+                if (paymentMethod.value === 'Online Banking') {
+                    const ok = validateBankIfVisible();
+                    payBtn.disabled = !ok;
+                }
+            });
+        }
 
         if (cardNumberEl) {
             cardNumberEl.addEventListener('input', () => {
@@ -760,6 +801,10 @@ include '../includes/header.php';
         // Final guard before submit
         document.getElementById('paymentForm').addEventListener('submit', function(e) {
             if (paymentMethod.value === 'Credit/Debit Card' && !validateCardSectionIfVisible()) {
+                e.preventDefault();
+                payBtn.disabled = true;
+            }
+            if (paymentMethod.value === 'Online Banking' && !validateBankIfVisible()) {
                 e.preventDefault();
                 payBtn.disabled = true;
             }
@@ -825,7 +870,7 @@ function sendPaymentEmail(mysqli $conn, int $booking_id, int $cust_id, float $am
             <table style='border-collapse:collapse;'>
                 <tr><td style='padding:4px 8px;font-weight:bold;'>Car Model</td><td style='padding:4px 8px;'>" . htmlspecialchars($car_model) . "</td></tr>
                 <tr><td style='padding:4px 8px;font-weight:bold;'>Pickup Date &amp; Time</td><td style='padding:4px 8px;'>{$pickup}</td></tr>
-                <tr><td style='padding:4px 8px;font-weight:bold;'>Return Date &amp; Time</td><td style='padding:4px 8px;'>{$return}</td></tr>
+                <tr><td style='padding:4px 8px;font-weight:bold;'>Return Date &amp; Time</td><td style='padding:4px 8px;'{$return}</td></tr>
                 <tr><td style='padding:4px 8px;font-weight:bold;'>Amount Paid</td><td style='padding:4px 8px;'>RM " . number_format($amount,2) . "</td></tr>
                 <tr><td style='padding:4px 8px;font-weight:bold;'>Payment Reference</td><td style='padding:4px 8px;'>" . intval($payment_id) . "</td></tr>
             </table>
