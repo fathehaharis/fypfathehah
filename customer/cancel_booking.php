@@ -11,13 +11,14 @@ date_default_timezone_set('Asia/Kuala_Lumpur');
 require '../connect.php';
 require '../vendor/autoload.php'; // PHPMailer
 
+// CSRF + method + input validation
 if (
     $_SERVER['REQUEST_METHOD'] !== 'POST' ||
     empty($_POST['csrf_token']) ||
     empty($_SESSION['csrf_token']) ||
     !hash_equals($_SESSION['csrf_token'], (string)($_POST['csrf_token'] ?? '')) ||
     !isset($_POST['booking_id']) ||
-    !ctype_digit($_POST['booking_id'])
+    !ctype_digit((string)$_POST['booking_id'])
 ) {
     $_SESSION['cancel_error'] = "Invalid or expired request.";
     header("Location: bookings.php");
@@ -32,14 +33,15 @@ $cust_id    = (int)$_SESSION['cust_id'];
  * If cancel 7+ days before: 100%
  * 3-6 days: 50%
  * 1-2 days: 25%
- * Same day or after: 0%
+ * Same day: 0%
+ * After pickup day: not allowed
  * Security deposit is always non-refundable.
  */
 const RENTAL_REFUND_POLICY_DAYS = [
     7 => 1.00,  // 7 or more days before pickup
     3 => 0.50,  // 3-6 days
     1 => 0.25,  // 1-2 days
-    0 => 0.00   // Same day or after
+    0 => 0.00   // Same day
 ];
 function determineRentalRefundRateDays(int $daysToPickup): float {
     foreach (RENTAL_REFUND_POLICY_DAYS as $threshold => $rate) {
@@ -49,8 +51,10 @@ function determineRentalRefundRateDays(int $daysToPickup): float {
 }
 
 function logBookingAction(mysqli $conn, int $booking_id, string $action): void {
+    // booking_log.action is VARCHAR(50) in the DDL, so keep it short
+    $action50 = substr($action, 0, 50);
     if ($stmt = $conn->prepare("INSERT INTO booking_log (booking_id, action) VALUES (?, ?)")) {
-        $stmt->bind_param("is", $booking_id, $action);
+        $stmt->bind_param("is", $booking_id, $action50);
         $stmt->execute();
         $stmt->close();
     }
@@ -59,6 +63,7 @@ function logBookingAction(mysqli $conn, int $booking_id, string $action): void {
 $conn->begin_transaction();
 
 try {
+    // Lock and fetch the booking row
     $stmt = $conn->prepare("
         SELECT 
             b.booking_id,
@@ -88,7 +93,7 @@ try {
         throw new Exception("Booking not found or access denied.");
     }
 
-    $status = strtolower($booking['status']);
+    $status = strtolower((string)$booking['status']);
     $depositStatus = strtolower((string)$booking['deposit_status']);
     $cancellableStatuses = ['pending','approved','waiting_verification','confirmed'];
     if (!in_array($status, $cancellableStatuses, true)) {
@@ -98,23 +103,40 @@ try {
         throw new Exception("Booking already cancelled.");
     }
 
-    // Calendar days to pickup
+    // Block cancellation if any service row indicates out_for_delivery OR pickup delivered
+    // per requirement: service.status = 'out_for_delivery' OR service.pickup_status = 'delivered'
+    $svc = $conn->prepare("
+        SELECT 1
+        FROM service
+        WHERE booking_id = ?
+          AND (status = 'out_for_delivery' OR pickup_status = 'delivered')
+        LIMIT 1 FOR UPDATE
+    ");
+    $svc->bind_param("i", $booking_id);
+    $svc->execute();
+    $svc->store_result();
+    $service_blocks_cancel = $svc->num_rows > 0;
+    $svc->close();
+
+    if ($service_blocks_cancel) {
+        throw new Exception("This booking cannot be cancelled while the vehicle is out for delivery or already delivered.");
+    }
+
+    // Calendar days to pickup (midnight-to-midnight, local time)
     $nowDay = (new DateTime('now', new DateTimeZone('Asia/Kuala_Lumpur')))->setTime(0,0,0,0);
     try {
-        $pickupDay = (new DateTime($booking['pickup_datetime'], new DateTimeZone('Asia/Kuala_Lumpur')))->setTime(0,0,0,0);
+        $pickupDay = (new DateTime((string)$booking['pickup_datetime'], new DateTimeZone('Asia/Kuala_Lumpur')))->setTime(0,0,0,0);
     } catch (Throwable $e) {
         $pickupDay = clone $nowDay;
     }
-    $days_to_pickup = (int)$nowDay->diff($pickupDay)->format('%r%a'); // negative means after pickup
+    $days_to_pickup = (int)$nowDay->diff($pickupDay)->format('%r%a'); // negative => pickup day has passed
 
-    // Prevent cancellation after pickup
+    // Prevent cancellation after pickup day
     if ($days_to_pickup < 0) {
         throw new Exception("Cannot cancel after the pickup day has passed.");
     }
-    // Block confirmed < 1 calendar day before pickup
-    if ($status === 'confirmed' && $days_to_pickup < 1) {
-        throw new Exception("Confirmed bookings cannot be cancelled less than 1 calendar day before pickup.");
-    }
+
+    // At this point, same-day cancellation is allowed but yields 0% rental refund (deposit forfeited)
 
     $security_deposit = (float)$booking['security_deposit'];
     $total_price = (float)$booking['total_price'];
@@ -126,7 +148,7 @@ try {
     // Prepare cancellation reason for audit
     $cancellation_reason = "Customer-initiated cancellation: Security deposit is non-refundable as per policy.";
 
-    // Update: mark as cancelled and forfeit deposit
+    // Update booking: mark as cancelled and forfeit deposit
     $update = $conn->prepare("
         UPDATE booking
         SET status = 'cancelled',
@@ -146,7 +168,7 @@ try {
     }
     $update->close();
 
-    // Insert refund record for rental fee if refund amount > 0
+    // Create refund record for rental fee if applicable
     if ($rental_refund_amount > 0) {
         $insertRefund = $conn->prepare("
             INSERT INTO refunds 
@@ -174,7 +196,7 @@ try {
     logBookingAction(
         $conn,
         $booking_id,
-        "Booking cancelled; rental refund=RM ".number_format($rental_refund_amount,2)." (rate ".($rental_refund_rate*100)."%) | Deposit forfeited"
+        "Cancelled; refund RM ".number_format($rental_refund_amount,2)." (".(int)round($rental_refund_rate*100)."%); deposit forfeit"
     );
 
     // Release car if no other active bookings
@@ -198,12 +220,12 @@ try {
         $carUpdate->bind_param("i", $car_id);
         $carUpdate->execute();
         $carUpdate->close();
-        logBookingAction($conn, $booking_id, "Car #{$car_id} marked available after cancellation.");
+        logBookingAction($conn, $booking_id, "Car {$car_id} available post cancel");
     }
 
     $conn->commit();
 
-    // Email after commit
+    // Send email after commit
     sendCancellationEmailRentalOnly(
         (string)$booking['email'],
         (string)$booking['username'],
@@ -211,8 +233,8 @@ try {
         (string)$booking['car_model'],
         (string)$booking['pickup_datetime'],
         (string)$booking['return_datetime'],
-        $security_deposit,
-        $total_price,
+        (float)$booking['security_deposit'],
+        (float)$booking['total_price'],
         $rental_refund_amount,
         $rental_refund_rate,
         $days_to_pickup
@@ -248,10 +270,11 @@ function sendCancellationEmailRentalOnly(
     $mail = new PHPMailer\PHPMailer\PHPMailer(true);
     try {
         $mail->isSMTP();
-        $mail->Host       = 'smtp.gmail.com'; // Your SMTP server
+        // TODO: Configure your SMTP credentials securely (e.g., .env)
+        $mail->Host       = 'smtp.gmail.com';
         $mail->SMTPAuth   = true;
-        $mail->Username   = 'fathehaharis69@gmail.com'; // Your SMTP username
-        $mail->Password   = 'cuel ijeu lzqv vsgv';   // Your SMTP password or app password
+        $mail->Username   = 'fathehaharis69@gmail.com'; // replace
+        $mail->Password   = 'cuel ijeu lzqv vsgv';         // replace
         $mail->SMTPSecure = 'tls';
         $mail->Port       = 587;
 
