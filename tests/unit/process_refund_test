@@ -1,0 +1,136 @@
+<?php
+declare(strict_types=1);
+
+require_once __DIR__ . '/../../tests/test_setup.php';
+
+class ProcessRefundTestDDL
+{
+    private DateTimeZone $tz;
+    public function __construct() { $this->tz = new DateTimeZone('Asia/Kuala_Lumpur'); }
+
+    private function tbl(mysqli $db, string $t): bool {
+        $st = $db->prepare("SHOW TABLES LIKE ?");
+        $st->bind_param("s", $t); $st->execute();
+        return $st->get_result()->num_rows > 0;
+    }
+    private function col(mysqli $db, string $t, string $c): bool {
+        $st = $db->prepare("SHOW COLUMNS FROM `$t` LIKE ?");
+        $st->bind_param("s", $c); $st->execute();
+        return $st->get_result()->num_rows > 0;
+    }
+
+    private function createCustomer(mysqli $db): array {
+        $u = "rf_u_" . time() . rand(100,999);
+        $e = $u . "@example.com";
+        $hash = password_hash("Customer123!", PASSWORD_DEFAULT);
+        $st = $db->prepare("INSERT INTO customer (full_name, phone_no, email, username, password) VALUES ('Refund Tester', '01112345678', ?, ?, ?)");
+        $st->bind_param("sss", $e, $u, $hash); $st->execute();
+        return ['cust_id'=>(int)$db->insert_id, 'username'=>$u, 'email'=>$e];
+    }
+    private function createCar(mysqli $db, float $rate=140.0): array {
+        $plate = "RF" . rand(1000,9999);
+        $st=$db->prepare("INSERT INTO car (car_brand,car_model,year,color,mileage,plate_no,transmission,seat_capacity,status,daily_rate) VALUES ('Perodua','Myvi',2024,'Blue',60000, ?, 'Automatic',5,'available', ?)");
+        $st->bind_param("sd", $plate, $rate); $st->execute();
+        return ['car_id'=>(int)$db->insert_id, 'rate'=>$rate];
+    }
+    private function createBooking(mysqli $db, int $custId, int $carId, string $status='cancelled', float $daily=140.0, int $days=1, float $deposit=100.0): int {
+        $pickup = (new DateTime('+1 day', $this->tz))->format('Y-m-d H:i:s');
+        $return = (new DateTime('+2 days', $this->tz))->format('Y-m-d H:i:s');
+        $total = $daily * $days + $deposit;
+        $st = $db->prepare("INSERT INTO booking (cust_id,car_id,pickup_datetime,return_datetime,day_count,daily_rate,total_price,security_deposit,status,deposit_status) VALUES (?,?,?,?,?,?,?,?,?, 'held')");
+        $st->bind_param("iissiddis", $custId, $carId, $pickup, $return, $days, $daily, $total, $deposit, $status);
+        $st->execute();
+        return (int)$db->insert_id;
+    }
+
+    // Rental refund processing: set refunds.refund_status from 'pending' to 'processed'
+    private function processRentalRefund(mysqli $db, int $bookingId, int $custId): array {
+        if (!$this->tbl($db,'refunds')) return ['ok'=>false, 'error'=>'no_refunds_table'];
+
+        // fetch a pending refund row created by cancellation flow
+        $row = $db->query("SELECT refund_id, amount, refund_status FROM refunds WHERE booking_id=$bookingId AND cust_id=$custId ORDER BY refund_id DESC LIMIT 1")->fetch_assoc();
+        if (!$row) return ['ok'=>false, 'error'=>'no_pending_refund'];
+        if ($row['refund_status'] !== 'pending') return ['ok'=>false, 'error'=>'already_processed'];
+
+        $st = $db->prepare("UPDATE refunds SET refund_status='processed', processed_at=NOW() WHERE refund_id=?");
+        $st->bind_param("i", $row['refund_id']); $st->execute();
+        return ['ok'=>true, 'amount'=>(float)$row['amount']];
+    }
+
+    // Deposit refund processing: update booking only (no refunds row)
+    private function processDepositRefund(mysqli $db, int $bookingId): array {
+        $b = $db->query("SELECT security_deposit, security_deposit_deduction, deposit_status FROM booking WHERE booking_id=$bookingId")->fetch_assoc();
+        if (!$b) return ['ok'=>false, 'error'=>'no_booking'];
+        if ($b['deposit_status'] === 'refunded') return ['ok'=>false, 'error'=>'already_refunded'];
+        if ($b['deposit_status'] !== 'pending_refund') return ['ok'=>false, 'error'=>'not_pending'];
+
+        $dep = (float)$b['security_deposit'];
+        $ded = (float)$b['security_deposit_deduction'];
+        $refund = max($dep - min($ded, $dep), 0.0);
+
+        $st = $db->prepare("UPDATE booking SET security_deposit_refund=?, deposit_status='refunded', deposit_last_adjusted_at=NOW() WHERE booking_id=?");
+        $st->bind_param("di", $refund, $bookingId); $st->execute();
+
+        return ['ok'=>true, 'amount'=>$refund];
+    }
+
+    public function testRentalRefundProcessing(): mixed {
+        $db = getTestDB(); $cust = $this->createCustomer($db); $car = $this->createCar($db);
+        $bookingId = $this->createBooking($db, $cust['cust_id'], $car['car_id'], 'cancelled', 140.0, 1, 100.0);
+
+        // Seed a pending rental refund row (as created by your cancel flow)
+        if ($this->tbl($db,'refunds')) {
+            $base = 140.0; $rate = 0.50; $amt = 70.0;
+            $ins = $db->prepare("INSERT INTO refunds (booking_id,cust_id,amount,refund_status,reference_code,notes,refund_rate,base_amount) VALUES (?,?,?,'pending',?,'Cancellation refund',?,?)");
+            $ref = "RENTAL-$bookingId"; $ins->bind_param("iidssd", $bookingId, $cust['cust_id'], $amt, $ref, $rate, $base);
+            $ins->execute(); $ins->close();
+        } else {
+            return "refunds table missing in test DB";
+        }
+
+        $res = $this->processRentalRefund($db, $bookingId, $cust['cust_id']);
+
+        // Cleanup
+        $db->query("DELETE FROM refunds WHERE booking_id=$bookingId");
+        $db->query("DELETE FROM booking WHERE booking_id=$bookingId");
+        $db->query("DELETE FROM car WHERE car_id={$car['car_id']}");
+        $db->query("DELETE FROM customer WHERE cust_id={$cust['cust_id']}");
+
+        if (!$res['ok']) return "Processing failed: " . ($res['error'] ?? '');
+        if (abs(($res['amount'] ?? 0) - 70.0) > 0.001) return "Expected processed amount 70.00";
+        return true;
+    }
+
+    public function testDepositRefundProcessing(): mixed {
+        $db = getTestDB(); $cust = $this->createCustomer($db); $car = $this->createCar($db);
+        $bookingId = $this->createBooking($db, $cust['cust_id'], $car['car_id'], 'completed', 140.0, 1, 100.0);
+        // mark pending_refund and set deduction
+        $db->query("UPDATE booking SET deposit_status='pending_refund', security_deposit_deduction=30.00 WHERE booking_id=$bookingId");
+
+        $res = $this->processDepositRefund($db, $bookingId);
+        $bk  = $db->query("SELECT deposit_status, security_deposit_refund FROM booking WHERE booking_id=$bookingId")->fetch_assoc();
+
+        // Cleanup
+        $db->query("DELETE FROM booking WHERE booking_id=$bookingId");
+        $db->query("DELETE FROM car WHERE car_id={$car['car_id']}");
+        $db->query("DELETE FROM customer WHERE cust_id={$cust['cust_id']}");
+
+        if (!$res['ok']) return "Deposit processing failed: " . ($res['error'] ?? '');
+        if (strtolower($bk['deposit_status']) !== 'refunded') return "Deposit status not refunded";
+        if (abs(((float)$bk['security_deposit_refund']) - 70.0) > 0.001) return "Expected deposit refund 70.00";
+        return true;
+    }
+}
+
+$test = new ProcessRefundTestDDL();
+$cases = [
+    'Rental refund (pending -> processed)' => $test->testRentalRefundProcessing(),
+    'Deposit refund (booking fields only)' => $test->testDepositRefundProcessing(),
+];
+
+echo "\nResults for Process Refund Tests (DDL-aligned)\n";
+echo "----------------------------------------------\n";
+foreach ($cases as $name => $res) {
+    if ($res === true) echo "$name: PASSED\n";
+    else echo "$name: FAILED\nReason: $res\n";
+}
