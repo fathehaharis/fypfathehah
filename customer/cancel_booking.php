@@ -38,9 +38,8 @@ $cust_id    = (int)$_SESSION['cust_id'];
  * Security deposit is always non-refundable.
  */
 const RENTAL_REFUND_POLICY_DAYS = [
-    7 => 1.00,  // 7 or more days before pickup
-    3 => 0.50,  // 3-6 days
-    1 => 0.25,  // 1-2 days
+    3 => 1.00,  // 3 or more days before pickup
+    1 => 0.50,  // 1–2 days
     0 => 0.00   // Same day
 ];
 function determineRentalRefundRateDays(int $daysToPickup): float {
